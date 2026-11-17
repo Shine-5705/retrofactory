@@ -89,3 +89,19 @@ Times are UTC. Where a figure was not stated in a room message, it is marked
 - Ledger: no stage-3 REJECT to record (none occurred).
 - Unit closed by coordinator freeze of 437e78b; closed in this log 2026-11-17 15:34.
 - Spend: not reported (no seat reported model or provider spend figures).
+
+## Stage 4 — dossier (in progress)
+
+- Prerequisite retro checklist (S4-1..S4-85 + 6 ambiguities + lessons + time/spend):
+  delivered 2026-11-17 ~15:50 (measured: `/tmp/opencode/s4-retro-reply.md` mtime
+  and this turn; 20-part handoff plan file `/tmp/opencode/s4-retro-plan.md` mtime
+  15:49). Sent to @coordinator as 5 parts via `factory/send-parts.py`. Lessons
+  carried forward: stage-2 REJECT (be11ee3, candidate dedupe key) applicable;
+  Standing rules still empty (no second occurrence).
+- S4-0a baseline copy stage-3/ -> stage-4/ commit d99b58b already exists;
+  stage-3/ untouched.
+- Implementation commit and review verdicts: not yet occurred. Review rounds:
+  0 so far.
+- Spend: STAGE 4 not reported. Carried from stages 1–3: not reported.
+- Unit remains open; close it here on the final ACCEPT and forward the frozen
+  revision's figures.
