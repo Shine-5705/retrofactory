@@ -1,6 +1,6 @@
 #!/usr/bin/env python3
 """Drive `acp-quiet.py -- opencode acp` like Band does and show what would be posted."""
-import json, subprocess, sys, threading, queue, os
+import json, subprocess, sys, threading, queue, os, uuid
 MODEL = sys.argv[1] if len(sys.argv) > 1 else "opencode/big-pickle"
 env = dict(os.environ, JAM_SESSION="drytest", ACP_QUIET_LOG_DIR="/workspace/band/ops/acp-quiet")
 p = subprocess.Popen(["python3", "/workspace/band/retrofactory/factory/acp-quiet.py", "--", "opencode", "acp"],
@@ -9,7 +9,7 @@ q = queue.Queue()
 threading.Thread(target=lambda: [q.put(json.loads(l)) for l in p.stdout], daemon=True).start()
 nid = [0]
 def call(method, params, timeout=240):
-    nid[0] += 1; i = nid[0]
+    i = str(uuid.uuid4())   # Band sends UUID string ids, not integers
     p.stdin.write((json.dumps({"jsonrpc": "2.0", "id": i, "method": method, "params": params}) + "\n").encode()); p.stdin.flush()
     chunks = []
     while True:

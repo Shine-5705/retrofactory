@@ -65,7 +65,7 @@ def main() -> int:
     logdir = os.environ.get("ACP_QUIET_LOG_DIR", "/workspace/band/ops/acp-quiet")
     os.makedirs(logdir, exist_ok=True)
     log = open(os.path.join(logdir, f"{seat}-{os.getpid()}.jsonl"), "a", buffering=1)
-    trace = os.environ.get("ACP_QUIET_TRACE") == "1"
+    trace = os.environ.get("ACP_QUIET_TRACE") == "1" or os.path.exists(os.path.join(logdir, "TRACE"))
 
     def note(**kw):
         kw["t"] = time.strftime("%Y-%m-%dT%H:%M:%S%z")
@@ -76,7 +76,17 @@ def main() -> int:
     agent_log = os.environ.get("ACP_QUIET_AGENT_LOG", os.path.expanduser("~/.local/share/opencode/log/opencode.log"))
     FAIL_RE = re.compile(r"Free usage limit|rate.?limit|Upstream request failed|inference service|"
                          r"Endpoint is unavailable|overloaded|AI_RetryError|status(Code)?[=: ]*(429|5\d\d)", re.I)
-    child = subprocess.Popen(argv, stdin=subprocess.PIPE, stdout=subprocess.PIPE)
+    # The runtime may launch us with a minimal PATH: resolve the agent binary explicitly.
+    import shutil
+    exe = shutil.which(argv[0]) or shutil.which(argv[0], path=os.path.expanduser("~/.local/bin"))
+    if not exe:
+        note(event="agent_not_found", argv=argv, path=os.environ.get("PATH", ""))
+        return 127
+    argv = [exe] + argv[1:]
+    env = dict(os.environ)
+    env["PATH"] = os.path.dirname(exe) + os.pathsep + env.get("PATH", "")
+    note(event="start", argv=argv, cwd=os.getcwd(), models=models)
+    child = subprocess.Popen(argv, stdin=subprocess.PIPE, stdout=subprocess.PIPE, env=env)
     out_lock = threading.Lock()
     pending = {}   # prompt request id -> sessionId
     prompts = {}   # prompt request id -> raw request line (for re-send on failover)
@@ -120,9 +130,16 @@ def main() -> int:
     def agent_to_client():
         for raw in child.stdout:
             try:
+                handle_out(raw)
+            except Exception as e:
+                note(event="relay_error", err=repr(e)[:200])
+                emit(raw)
+
+    def handle_out(raw):
+            try:
                 msg = json.loads(raw)
             except Exception:
-                emit(raw); continue
+                emit(raw); return
             if trace:
                 note(dir="out", msg=str(msg)[:400])
             if isinstance(msg, dict) and msg.get("method") == "session/update":
@@ -133,12 +150,12 @@ def main() -> int:
                     c = upd.get("content") or {}
                     if c.get("type") == "text":
                         texts[sid] += c.get("text", "")
-                    continue
-            if isinstance(msg, dict) and msg.get("id", 0) >= 10**9 and "method" not in msg:
-                continue   # responses to the proxy's own set_model/cancel requests
+                    return
+            if isinstance(msg, dict) and isinstance(msg.get("id"), int) and msg["id"] >= 10**9 and "method" not in msg:
+                return   # responses to the proxy's own set_model/cancel requests
             if isinstance(msg, dict) and "id" in msg and msg.get("id") in retrying and "method" not in msg:
                 retrying.pop(msg["id"])   # the cancelled attempt ended; the re-sent prompt follows
-                continue
+                return
             if isinstance(msg, dict) and "id" in msg and msg.get("id") in pending and "method" not in msg:
                 sid = pending.pop(msg["id"]); prompts.pop(msg["id"], None)
                 lines, text = held.pop(sid, []), texts.pop(sid, "")
