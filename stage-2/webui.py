@@ -408,9 +408,10 @@ DOSSIER_SCRIPT = r"""
   }
 
   function schedulePoll(state){
-    if(pollTimer){clearTimeout(pollTimer);pollTimer=null;}
     if(state==='building'){
-      pollTimer=setTimeout(function(){readDossier();},2000);
+      if(!pollTimer){pollTimer=setInterval(function(){readDossier();},2000);}
+    }else if(pollTimer){
+      clearInterval(pollTimer);pollTimer=null;
     }
   }
 

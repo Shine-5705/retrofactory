@@ -1,6 +1,7 @@
 # Dossier — Stage 2
 
-Self-contained HTTP service. It listens on `0.0.0.0:$PORT` (default `8080`).
+Self-contained HTTP service and browser product. It listens on `0.0.0.0:$PORT`
+(default `8080`).
 
 ## Build
 
@@ -15,8 +16,9 @@ docker run --rm -e PORT=8080 -p 8080:8080 dossier-stage-2
 ```
 
 The deployment's environment supplies `NIMBLE_API_KEY` and `NIMBLE_BASE_URL`
-(and optionally `TAVILY_API_KEY`, `TAVILY_BASE_URL`). Pass them with `-e` or an
-env file; never bake credentials into the image.
+(and optionally `TAVILY_API_KEY`, `TAVILY_BASE_URL`, `KERNEL_API_KEY`,
+`KERNEL_BASE_URL`, `BROWSERBASE_API_KEY`, `BROWSERBASE_BASE_URL`). Pass them
+with `-e` or an env file; never bake credentials into the image.
 
 ```sh
 docker run --rm -e PORT=8080 -p 8080:8080 \
@@ -29,6 +31,11 @@ Verify:
 curl -s http://localhost:8080/health
 # {"status":"ok"}
 ```
+
+The API and the browser share the same process. Browser screens are at `/`,
+`/dossiers/{domain}`, `/dossiers/{domain}/evidence`, `/contested`, `/signup`
+and `/login`; `/dossiers/{domain}` answers JSON unless the request accepts
+`text/html`.
 
 ## Local run without Docker
 
