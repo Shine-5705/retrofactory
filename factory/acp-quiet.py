@@ -270,7 +270,9 @@ def main() -> int:
                 note(event="failover_exhausted", session=sid, model=cur, reason=reason[:160]); return
             nxt = min(others, key=lambda m: failed_at.get(m, 0))
             note(event="failover_all_cooling", session=sid, model=cur, pick=nxt)
+            time.sleep(45)   # every model is limited: back off before trying again
         note(event="failover", session=sid, frm=cur, to=nxt, reason=reason[:160])
+        last_fo.pop((rid, nxt.split("/")[-1]), None)   # the model we move to may fail over again
         retrying[rid] = True
         held[sid] = []; texts[sid] = ""
         send_agent({"jsonrpc": "2.0", "method": "session/cancel", "params": {"sessionId": sid}})
