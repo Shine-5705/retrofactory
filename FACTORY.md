@@ -49,7 +49,16 @@ pasted verbatim. No human message between dispatch and the coordinator's final r
    separate from authorship.
 5. **Stage freeze is explicit.** The coordinator announces a frozen revision before the next
    spec enters the room, so the room log shows ordering.
-6. **Generic mandates.** No product, endpoint, field or error vocabulary in any mandate;
+6. **Quiet turns and model failover (`factory/acp-quiet.py`).** Band's OpenCode runtime
+   posts the text a seat ends its turn with as a reply, which wakes the sender; free models
+   rarely end on empty text, so bare "no action needed" replies used to bounce between
+   seats (191 of 221 messages in a practice run). Each seat's OpenCode process runs behind
+   a small pass-through ACP proxy that drops the end-of-turn text only when all of it is a
+   bare acknowledgement (short, no verdict, revision or code), and that switches the seat
+   to its next listed model when the free tier reports a usage limit or upstream failure.
+   It never writes or edits content: every message, tool call and commit is the agent's.
+   Each decision is logged per seat.
+7. **Generic mandates.** No product, endpoint, field or error vocabulary in any mandate;
    all track detail arrives in the dispatch. `harness check` mandate scan passes on these
    files.
 
@@ -60,10 +69,13 @@ pasted verbatim. No human message between dispatch and the coordinator's final r
 2. Create four local agents named exactly `coordinator`, `implementer`, `reviewer`, `retro`.
    Paste each mandate as that agent's instructions and set `Harness:`, `Model:`, `Effort:`
    in each mandate file to the real values.
-3. Give each seat its own Git identity; give all seats the absolute path of the result
+3. Run `factory/create_seats.sh <run folder>` (creates the seats, links the mandates,
+   sets models and launches them through `factory/acp-quiet.py`). The run folder holds
+   only the result repository.
+4. Give each seat its own Git identity; give all seats the absolute path of the result
    repository and permission to run Git, Docker and the harness.
-4. Create one fresh room, add the four seats, then paste the stage-1 dispatch.
-5. Follow `factory/RUNBOOK.md` for checks, export and the live artifact.
+5. Create one fresh room, add the four seats, then paste the stage-1 dispatch.
+6. Follow `factory/RUNBOOK.md` for checks, export and the live artifact.
 
 ## 5. What we tried that failed **[from the run]**
 

@@ -73,6 +73,30 @@ Other practice-2 lessons:
   `band restart`), then `band detach --host-session default-<old room id>` per seat, and
   check `band status` shows only the parked `default` session.
 
+## 0e. Lessons from practice-3 (17 Nov) — acknowledgement loop and quota
+
+Practice-3 passed (stage 1 8/8, $0), but 191 of 221 room messages were acknowledgement
+ping-pong and the first 11 minutes were lost to a free-model usage limit.
+
+- Root cause of the loop: Band's owned OpenCode runtime posts the text an agent ends its
+  turn with as a reply to the sender (an empty turn is silent), and these models rarely end
+  on empty text. Band offers no per-agent switch for this in 0.4.18 (checked `band --help`,
+  `band runtime template/settings/defaults`, experiments); the OpenCode transport has no
+  disposition tools.
+- Fix: seats launch OpenCode through `factory/acp-quiet.py`, a pass-through ACP proxy.
+  It holds the agent's message text until the turn ends and drops it only when the whole
+  text is a bare acknowledgement/status line (short, matches the patterns, and carries no
+  verdict, revision hash or code). Everything else passes unchanged. Decisions are logged
+  to `ops/acp-quiet/<seat>-<pid>.jsonl`. It never writes content, so the work in the room
+  is still the agents' own; FACTORY.md discloses it.
+- Quota: OpenCode free models hit "Free usage limit reached" per model after sustained use
+  and recover within roughly an hour; some return upstream errors at times. acp-quiet also
+  fails over: on such an error for the turn in flight it cancels, switches the session to
+  the seat's next model and re-sends the same prompt. Each seat has a distinct primary and
+  two fallbacks (create_seats.sh, mandate Model: lines).
+- Polling: the coordinator checked `git log` 33 times inside one turn. Mandates now ban
+  repeated checks of the repository, check folders or room; the handoff message is the wake.
+
 ## 1. Kickoff package
 
 ```sh
