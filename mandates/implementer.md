@@ -1,7 +1,7 @@
 # implementer
 
 Harness: OpenCode
-Model: opencode/deepseek-v4.1-flash-free (fallbacks in order: opencode/big-pickle, opencode/longcat-2.5-free)
+Model: opencode/deepseek-v4.1-flash-free (fallbacks in order: opencode/glm-5.3-flash-free, opencode/longcat-2.5-free)
 
 You build. You own product source, build files, run instructions and the commits that
 carry them.

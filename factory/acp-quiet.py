@@ -41,10 +41,19 @@ MENTION_RE = re.compile(r"@\[\[[^\]]*\]\]|@[\w.-]+(/[\w.-]+)?")
 KEEP_RE = re.compile(r"\b(PASS|ACCEPT\w*|REJECT\w*|FAIL\w*|BLOCK\w*|error|verdict|frozen|"
                      r"final report|[0-9a-f]{7,40})\b|```", re.I)
 
+SILENT_RE = re.compile(r"\bend(ing|s)?( (the|my|this))?( turn)? silently\b|\bno tool calls?\b|\bnothing (more |further )?(is )?needed\b", re.I)
+
 def is_ack(text: str) -> bool:
     core = MENTION_RE.sub("", text)
     core = re.sub(r"</?[A-Za-z][^>]*>", "", core).strip()   # placeholder markup such as <void />
     if not core:
+        return True
+    # A short turn that says it is ending silently is never meant for the room, whatever words it quotes
+    if len(core) <= MAX_ACK_CHARS and SILENT_RE.search(core):
+        return True
+    # The same ack sentence repeated many times (a looping model) is still an ack
+    sents = {x.strip().lower() for x in re.split(r"(?<=[.!?])\s+|\n+", core) if x.strip()}
+    if len(core) > MAX_ACK_CHARS and len(sents) <= 3 and ACK_RE.search(core):
         return True
     # "waiting on the verdict" is status, not a verdict: drop that phrase before the keep check
     if KEEP_RE.search(re.sub(r"\b(awaiting|waiting (on|for))\b[^.;\n]{0,40}\bverdict\b", "", core, flags=re.I)):
@@ -97,7 +106,7 @@ def main() -> int:
     failed_at = {} # model -> time it last failed
     current = {}   # sessionId -> model in use
     own_id = [10**9]
-    last_fo = {}   # prompt request id -> time of last failover
+    last_fo = {}   # (prompt request id, failing model) -> time of last failover
     held = {}      # sessionId -> list of raw lines (agent_message_chunk updates)
     texts = {}     # sessionId -> accumulated text
 
@@ -214,8 +223,10 @@ def main() -> int:
             if "stream error" not in line and "AI_RetryError" not in line: continue
             if not FAIL_RE.search(line): continue
             for rid, sid in list(pending.items()):
-                if sid and sid in line and rid not in retrying and time.time() - last_fo.get(rid, 0) > 20:
-                    last_fo[rid] = time.time()
+                mm = re.search(r"modelID=(\S+)", line)
+                key = (rid, mm.group(1) if mm else "")   # guard per model: a fresh model failing still fails over
+                if sid and sid in line and rid not in retrying and time.time() - last_fo.get(key, 0) > 20:
+                    last_fo[key] = time.time()
                     threading.Thread(target=failover, args=(rid, sid, line), daemon=True).start()
 
     threading.Thread(target=watch_agent_log, daemon=True).start()
