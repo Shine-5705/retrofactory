@@ -111,6 +111,7 @@ def main() -> int:
     last_fo = {}   # (prompt request id, failing model) -> time of last failover
     held = {}      # sessionId -> list of raw lines (agent_message_chunk updates)
     texts = {}     # sessionId -> accumulated text
+    segs = {}      # sessionId -> text since the last tool call (the closing text)
 
     def emit(raw: bytes):
         with out_lock:
@@ -237,23 +238,26 @@ def main() -> int:
                     c = upd.get("content") or {}
                     if c.get("type") == "text":
                         texts[sid] += c.get("text", "")
+                        segs[sid] = segs.get(sid, "") + c.get("text", "")
                     return
+                if sid in held and upd.get("sessionUpdate") in ("tool_call", "tool_call_update"):
+                    segs[sid] = ""   # closing text = message text after the turn's last tool call
             if isinstance(msg, dict) and msg.get("id") in injected and "method" not in msg and msg.get("id") not in retrying:
                 sid = pending.pop(msg["id"], None); prompts.pop(msg["id"], None); injected.discard(msg["id"])
-                text = texts.pop(sid, ""); held.pop(sid, None)
+                text = texts.pop(sid, ""); held.pop(sid, None); closing = segs.pop(sid, "")
                 note(event="inject_done", session=sid, chars=len(text), text=text[:2000], result=str(msg.get("result") or msg.get("error"))[:200])
                 req = inject_req.pop(msg["id"], {})
-                if text.strip() and not is_ack(text) and req.get("room") and req.get("as"):
+                if closing.strip() and not is_ack(closing) and req.get("room") and req.get("as"):
                     # Post the closing text as this seat, as Band does after a normal delivery.
                     try:
                         name = f".acp-quiet-reply-{seat}-{msg['id']}.txt"
                         with open(name, "w") as fh:
-                            fh.write(text)
+                            fh.write(closing.strip())
                         band = shutil.which("band") or "/usr/bin/band"
                         r = subprocess.run([band, "send", "--as", req["as"], "--body-file", name, req["room"]],
                                            capture_output=True, text=True, timeout=60)
                         os.remove(name)
-                        note(event="inject_reply_posted", session=sid, chars=len(text), rc=r.returncode,
+                        note(event="inject_reply_posted", session=sid, chars=len(closing), rc=r.returncode,
                              out=(r.stdout + r.stderr)[-300:])
                     except Exception as e:
                         note(event="inject_reply_error", err=repr(e)[:300])
