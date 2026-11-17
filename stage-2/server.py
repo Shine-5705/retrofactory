@@ -17,7 +17,7 @@ import threading
 import time
 from datetime import datetime, timezone
 
-from flask import Flask, Response, request
+from flask import Flask, Response, redirect, request
 from werkzeug.exceptions import HTTPException
 from werkzeug.security import check_password_hash, generate_password_hash
 
@@ -27,6 +27,15 @@ from dossier_support import (
     excerpt_value,
     split_prose,
     split_sentences,
+)
+from selection import candidates_from_pages, imported_field, rebuild_field_from_candidates
+from webui import (
+    auth_page,
+    contested_page,
+    dossier_page,
+    evidence_page,
+    list_page,
+    message_page,
 )
 
 app = Flask(__name__)
@@ -100,7 +109,7 @@ def company_name(domain: str) -> str:
 
 def empty_fields() -> dict:
     return {
-        field: {"value": None, "status": "unknown", "citations": []}
+        field: {"value": None, "status": "unknown", "citations": [], "candidates": []}
         for field in FIELDS
     }
 
@@ -186,7 +195,10 @@ def canonical_body(value: object) -> str:
     return json.dumps(value, sort_keys=True, separators=(",", ":"), ensure_ascii=False)
 
 
-def auth_user(state: State) -> str | None:
+SESSION_COOKIE = "dossier_session"
+
+
+def bearer_token() -> str | None:
     header = request.headers.get("Authorization")
     if not header:
         return None
@@ -194,10 +206,28 @@ def auth_user(state: State) -> str | None:
     if len(parts) != 2 or parts[0].lower() != "bearer":
         return None
     token = parts[1].strip()
+    return token or None
+
+
+def auth_user(state: State) -> str | None:
+    token = bearer_token()
+    if token is None:
+        token = request.cookies.get(SESSION_COOKIE)
     if not token:
         return None
     with state.lock:
         return state.tokens.get(token)
+
+
+def current_user(state: State) -> dict | None:
+    user_id = auth_user(state)
+    if user_id is None:
+        return None
+    with state.lock:
+        user = state.users.get(user_id)
+        if user is None:
+            return None
+        return {"id": user["id"], "email": user["email"], "display_name": user["display_name"]}
 
 
 def idempotency_header() -> tuple[str | None, Response | None]:
@@ -305,131 +335,178 @@ def _timeout_for(deadline: float, cap: float) -> float | None:
     return max(1.0, min(cap, remaining - 2.0))
 
 
-def _do_search(state: State, dossier: dict, query: str, cost: int, deadline: float):
-    if not _reserve(state, dossier, cost):
-        return None
-    timeout = _timeout_for(deadline, 60.0)
-    if timeout is None:
-        _refund(state, dossier, cost)
-        return None
-    try:
-        response = get_router().search(
+def _is_429(exc: Exception) -> bool:
+    status = getattr(exc, "status_code", None)
+    if status == 429:
+        return True
+    failures = getattr(exc, "failures", None)
+    if isinstance(failures, dict) and failures:
+        return all(getattr(inner, "status_code", None) == 429 for inner in failures.values())
+    return False
+
+
+class Deadline:
+    """A build deadline that 429 back-off waits extend, so they are not charged to it."""
+
+    def __init__(self, seconds: float) -> None:
+        self.at = time.monotonic() + seconds
+
+    def remaining(self) -> float:
+        return self.at - time.monotonic()
+
+    def extend(self, seconds: float) -> None:
+        self.at += seconds
+
+
+def _with_429(state: State, dossier: dict, cost: int, deadline: Deadline, call):
+    """Make one provider call, retrying a 429 after a full second, up to three times.
+
+    A call answered 429 costs nothing, so each attempt reserves and then refunds.
+    """
+    attempts = 0
+    while True:
+        if not _reserve(state, dossier, cost):
+            return None
+        if deadline.remaining() <= 5:
+            _refund(state, dossier, cost)
+            return None
+        try:
+            return call(deadline)
+        except Exception as exc:
+            if _is_429(exc):
+                _refund(state, dossier, cost)
+                attempts += 1
+                if attempts > 3:
+                    return None
+                time.sleep(1.05)
+                deadline.extend(1.05)
+                continue
+            if _exception_was_refused(exc):
+                _refund(state, dossier, cost)
+            return None
+
+
+def _do_search(state: State, dossier: dict, query: str, cost: int, deadline: Deadline):
+    def call(deadline: Deadline):
+        timeout = _timeout_for(deadline.at, 60.0)
+        if timeout is None:
+            raise TimeoutError("no time left")
+        return get_router().search(
             query,
             provider="nimble",
-            search_depth="deep",
+            search_depth="lite",
             max_results=10,
             timeout=timeout,
             data_apis=False,
         )
-        return response
-    except Exception as exc:
-        if _exception_was_refused(exc):
-            _refund(state, dossier, cost)
-        return None
+
+    return _with_429(state, dossier, cost, deadline, call)
 
 
-def _do_research(state: State, dossier: dict, query: str, cost: int, deadline: float):
-    if not _reserve(state, dossier, cost):
-        return None
-    timeout = _timeout_for(deadline, 200.0)
-    if timeout is None:
-        _refund(state, dossier, cost)
-        return None
-    try:
+def _do_research(state: State, dossier: dict, query: str, cost: int, deadline: Deadline):
+    def call(deadline: Deadline):
+        timeout = _timeout_for(deadline.at, 200.0)
+        if timeout is None:
+            raise TimeoutError("no time left")
         return get_router().research(
             query,
             provider="nimble",
             output_schema=RESEARCH_SCHEMA,
             timeout=timeout,
         )
-    except Exception as exc:
-        if _exception_was_refused(exc):
-            _refund(state, dossier, cost)
-        return None
+
+    return _with_429(state, dossier, cost, deadline, call)
 
 
-def _search_pages(response, pages: list[dict]) -> None:
+def _do_extract(state: State, dossier: dict, url: str, deadline: Deadline):
+    """Read one page's browser-rendered text: 3 units per URL requested."""
+
+    def call(deadline: Deadline):
+        timeout = _timeout_for(deadline.at, 30.0)
+        if timeout is None:
+            raise TimeoutError("no time left")
+        return get_router().extract(
+            [url],
+            provider="nimble",
+            provider_options={"render": True},
+            timeout=timeout,
+        )
+
+    return _with_429(state, dossier, 3, deadline, call)
+
+
+def _search_urls(response, urls: list[str]) -> None:
     if response is None:
         return
-    provider = getattr(response, "provider", None) or "nimble"
     for result in getattr(response, "results", []) or []:
-        text = getattr(result, "content", "") or getattr(result, "description", "")
         url = getattr(result, "url", "") or ""
-        title = getattr(result, "title", "") or ""
+        if isinstance(url, str) and url.startswith(("http://", "https://")):
+            urls.append(url)
+
+
+def _citation_urls(response, urls: list[str]) -> None:
+    if response is None:
+        return
+    for citation in getattr(response, "citations", []) or []:
+        url = getattr(citation, "url", "") or ""
+        if isinstance(url, str) and url.startswith(("http://", "https://")):
+            urls.append(url)
+
+
+def _extract_text(response, requested_url: str) -> list[dict]:
+    pages: list[dict] = []
+    if response is None:
+        return pages
+    provider = getattr(response, "provider", None) or "nimble"
+    for document in getattr(response, "documents", []) or []:
+        text = getattr(document, "content", "") or ""
+        url = getattr(document, "url", "") or requested_url
+        title = getattr(document, "title", "") or ""
         if isinstance(text, str) and text.strip():
             pages.append({"url": url, "title": title, "text": text, "provider": provider})
+    return pages
 
 
-def _research_pages(response, pages: list[dict]) -> None:
-    if response is None:
-        return
-    provider = getattr(response, "provider", None) or "nimble"
-    for citation in getattr(response, "citations", []) or []:
-        snippet = getattr(citation, "snippet", "") or ""
-        if isinstance(snippet, str) and snippet.strip():
-            pages.append(
-                {
-                    "url": getattr(citation, "url", "") or "",
-                    "title": getattr(citation, "title", "") or "",
-                    "text": snippet,
-                    "provider": provider,
-                }
-            )
+def _priority_urls(urls: list[str], citation_urls: set[str], domain: str) -> list[str]:
+    from urllib.parse import urlsplit
 
+    def host(url: str) -> str:
+        try:
+            value = urlsplit(url).hostname or ""
+        except ValueError:
+            return ""
+        value = value.lower()
+        while value.endswith("."):
+            value = value[:-1]
+        if value.startswith("www."):
+            value = value[4:]
+        return value
 
-def decide_fields(pages: list[dict], domain: str) -> dict:
-    company = company_name(domain)
-    candidates: dict[str, dict] = {field: {} for field in FIELDS}
+    unique: list[str] = []
+    seen: set[str] = set()
+    for url in urls:
+        if url not in seen:
+            seen.add(url)
+            unique.append(url)
 
-    for page in pages:
-        url = page.get("url") or ""
-        provider = page.get("provider") or "nimble"
-        prose = split_prose(page.get("text") or "")
-        for line in prose.splitlines():
-            for sentence in split_sentences(line):
-                excerpt = collapse_ws(sentence)
-                if not (1 <= len(excerpt) <= 500):
-                    continue
-                for field in FIELDS:
-                    value = excerpt_value(excerpt, field, company, domain)
-                    if value is None:
-                        continue
-                    bucket = candidates[field].setdefault(value, [])
-                    citation = {"url": url, "excerpt": excerpt, "provider": provider}
-                    if citation not in bucket:
-                        bucket.append(citation)
+    def key(url: str) -> tuple:
+        return (0 if url in citation_urls else 1, 0 if host(url) == domain else 1)
 
-    fields: dict[str, dict] = {}
-    for field in FIELDS:
-        bucket = candidates[field]
-        if not bucket:
-            fields[field] = {"value": None, "status": "unknown", "citations": []}
-            continue
-        best_value = None
-        best_citations: list[dict] = []
-        for value, citations in bucket.items():
-            if len(citations) > len(best_citations):
-                best_value = value
-                best_citations = citations
-        fields[field] = {
-            "value": best_value,
-            "status": "known",
-            "citations": list(best_citations),
-        }
-    return fields
+    return sorted(unique, key=key)
 
 
 _EXTRA_QUERIES = [
     "{company} company profile",
     "{company} headquarters founded CEO funding employees",
     "{company} official website about company",
-    "{company} annual revenue funding headcount leadership",
     "{company} about us founded headquarters chief executive",
 ]
 
 
 def _build_worker(state: State, dossier: dict, build_time: datetime, generation: int) -> None:
-    deadline = time.monotonic() + 288.0
+    deadline = Deadline(288.0)
+    urls: list[str] = []
+    citation_urls: set[str] = set()
     pages: list[dict] = []
     any_success = False
     domain = dossier["domain"]
@@ -444,10 +521,10 @@ def _build_worker(state: State, dossier: dict, build_time: datetime, generation:
 
         if router_ok:
             # Exactly one successful search whose query is the normalised domain.
-            response = _do_search(state, dossier, domain, 15, deadline)
+            response = _do_search(state, dossier, domain, 1, deadline)
             if response is not None:
                 any_success = True
-                _search_pages(response, pages)
+                _search_urls(response, urls)
 
             research = _do_research(
                 state,
@@ -459,19 +536,32 @@ def _build_worker(state: State, dossier: dict, build_time: datetime, generation:
             )
             if research is not None:
                 any_success = True
-                _research_pages(research, pages)
+                found: list[str] = []
+                _citation_urls(research, found)
+                for url in found:
+                    citation_urls.add(url)
+                urls.extend(found)
 
             for template in _EXTRA_QUERIES:
-                if deadline - time.monotonic() < 20:
+                if deadline.remaining() < 20:
                     break
                 query = template.format(company=company)
-                response = _do_search(state, dossier, query, 15, deadline)
+                response = _do_search(state, dossier, query, 1, deadline)
                 if response is None:
                     continue
                 any_success = True
-                _search_pages(response, pages)
+                _search_urls(response, urls)
 
-        fields = decide_fields(pages, domain)
+            for url in _priority_urls(urls, citation_urls, domain):
+                if deadline.remaining() < 4:
+                    break
+                extracted = _do_extract(state, dossier, url, deadline)
+                if extracted is None:
+                    continue
+                any_success = True
+                pages.extend(_extract_text(extracted, url))
+
+        fields = candidates_from_pages(pages, domain, company, now_iso(build_time))
     except Exception:
         fields = empty_fields()
         any_success = False
@@ -601,13 +691,24 @@ def _export_state(state: State) -> dict:
 def _valid_field_entry(entry: object) -> bool:
     if not isinstance(entry, dict):
         return False
-    if entry.get("status") not in ("known", "unknown"):
+    if entry.get("status") not in ("known", "contested", "unknown"):
         return False
     if "value" not in entry or not isinstance(entry.get("citations"), list):
+        return False
+    if "candidates" in entry and not isinstance(entry["candidates"], list):
         return False
     if entry["status"] == "unknown":
         return entry.get("value") is None and entry["citations"] == []
     return entry.get("value") is not None and len(entry["citations"]) >= 1
+
+
+def _imported_field(entry: dict, researched_at: str | None) -> dict:
+    value = entry.get("value")
+    candidates = entry.get("candidates")
+    if isinstance(candidates, list):
+        return rebuild_field_from_candidates(value, candidates)
+    citations = entry.get("citations") or []
+    return imported_field(value, citations, researched_at)
 
 
 def _state_from_export(payload: object, clock: datetime | None) -> State | None:
@@ -670,12 +771,15 @@ def _state_from_export(payload: object, clock: datetime | None) -> State | None:
             return None
         if domain in state.dossiers:
             return None
+        imported_fields = {
+            field: _imported_field(fields[field], researched_at) for field in FIELDS
+        }
         state.dossiers[domain] = {
             "id": dossier_id,
             "domain": domain,
             "state": outcome,
             "last_outcome": outcome,
-            "fields": copy.deepcopy(fields),
+            "fields": imported_fields,
             "researched_at": researched_at,
             "spent_units": spent,
             "base_spent": spent,
@@ -812,21 +916,15 @@ def test_import():
     return empty_response(204)
 
 
-@app.post("/auth/signup")
-def signup():
-    body, ok = read_json_body()
-    if not ok:
-        return malformed("unparseable signup body")
-    if not isinstance(body, dict):
-        return malformed("signup body must be an object")
+def _create_account(payload: dict):
     for key in ("email", "password", "display_name"):
-        if key in body and not isinstance(body[key], str):
+        if key in payload and not isinstance(payload[key], str):
             return malformed(f"{key} must be a string")
-    if "email" not in body or "password" not in body or "display_name" not in body:
+    if "email" not in payload or "password" not in payload or "display_name" not in payload:
         return validation_error("email, password and display_name are required")
-    email = body["email"]
-    password = body["password"]
-    display_name = body["display_name"]
+    email = payload["email"]
+    password = payload["password"]
+    display_name = payload["display_name"]
     if not _EMAIL_RE.match(email):
         return validation_error("email must be local@domain")
     if len(password) < 8:
@@ -851,9 +949,44 @@ def signup():
         }
         state.email_index[email_key] = user_id
         state.tokens[token] = user_id
-    return json_response(
-        {"user_id": user_id, "display_name": display_name, "token": token}, 201
-    )
+    return {"user_id": user_id, "display_name": display_name, "token": token}, 201
+
+
+def _authenticate(payload: dict):
+    for key in ("email", "password"):
+        if key in payload and not isinstance(payload[key], str):
+            return malformed(f"{key} must be a string")
+    if "email" not in payload or "password" not in payload:
+        return validation_error("email and password are required")
+    email_key = payload["email"].lower()
+    state = _STATE
+    with state.lock:
+        user_id = state.email_index.get(email_key)
+        user = state.users.get(user_id) if user_id else None
+        password_hash = user["password_hash"] if user else None
+    if user is None or password_hash is None or not check_password_hash(
+        password_hash, payload["password"]
+    ):
+        return unauthenticated("wrong email or password")
+    with state.lock:
+        token = token_for_user(state)
+        state.tokens[token] = user["id"]
+        display_name = user["display_name"]
+        user_id = user["id"]
+    return {"user_id": user_id, "display_name": display_name, "token": token}, 200
+
+
+@app.post("/auth/signup")
+def signup():
+    body, ok = read_json_body()
+    if not ok:
+        return malformed("unparseable signup body")
+    if not isinstance(body, dict):
+        return malformed("signup body must be an object")
+    result = _create_account(body)
+    if isinstance(result, Response):
+        return result
+    return json_response(result[0], result[1])
 
 
 @app.post("/auth/login")
@@ -863,25 +996,10 @@ def login():
         return malformed("unparseable login body")
     if not isinstance(body, dict):
         return malformed("login body must be an object")
-    for key in ("email", "password"):
-        if key in body and not isinstance(body[key], str):
-            return malformed(f"{key} must be a string")
-    if "email" not in body or "password" not in body:
-        return validation_error("email and password are required")
-    email_key = body["email"].lower()
-    state = _STATE
-    with state.lock:
-        user_id = state.email_index.get(email_key)
-        user = state.users.get(user_id) if user_id else None
-        password_hash = user["password_hash"] if user else None
-    if user is None or password_hash is None or not check_password_hash(password_hash, body["password"]):
-        return unauthenticated("wrong email or password")
-    with state.lock:
-        token = token_for_user(state)
-        state.tokens[token] = user["id"]
-        display_name = user["display_name"]
-        user_id = user["id"]
-    return json_response({"user_id": user_id, "display_name": display_name, "token": token})
+    result = _authenticate(body)
+    if isinstance(result, Response):
+        return result
+    return json_response(result[0], result[1])
 
 
 @app.post("/dossiers")
@@ -1007,11 +1125,74 @@ def list_dossiers():
     return json_response(payload)
 
 
+def wants_html() -> bool:
+    return "text/html" in (request.headers.get("Accept") or "")
+
+
+def html_response(body: str, status: int = 200) -> Response:
+    response = Response(body, status=status, mimetype="text/html")
+    response.headers["Content-Type"] = "text/html; charset=utf-8"
+    return response
+
+
+def login_redirect():
+    return redirect("/login", code=303)
+
+
+def _error_message(response: Response) -> str:
+    try:
+        payload = json.loads(response.get_data(as_text=True))
+        return payload.get("error", {}).get("message") or payload.get("error", {}).get("code") or ""
+    except Exception:
+        return ""
+
+
+def _filtered_dossiers(state: State, query: str | None) -> list[dict]:
+    with state.lock:
+        items = [
+            dossier_view(dossier)
+            for dossier in sorted(state.dossiers.values(), key=lambda d: d["domain"])
+        ]
+    if query:
+        needle = query.lower()
+        filtered = []
+        for item in items:
+            legal_name = item["fields"].get("legal_name", {}).get("value")
+            haystacks = [item["domain"].lower()]
+            if isinstance(legal_name, str):
+                haystacks.append(legal_name.lower())
+            if any(needle in haystack for haystack in haystacks):
+                filtered.append(item)
+        items = filtered
+    return items
+
+
+@app.get("/dossiers/<path:domain>/evidence")
+def evidence_screen(domain: str):
+    state = _STATE
+    user = current_user(state)
+    if user is None:
+        return login_redirect()
+    try:
+        normalised = normalise_domain(domain)
+    except ValueError:
+        return html_response(message_page("Invalid domain", "That domain is not valid.", user=user), 422)
+    with state.lock:
+        dossier = state.dossiers.get(normalised)
+        data = dossier_view(dossier) if dossier is not None else None
+    if data is None:
+        return html_response(dossier_page(None, normalised, user=user, not_found=True))
+    return html_response(evidence_page(data, user=user))
+
+
 @app.get("/dossiers/<path:domain>")
 def get_dossier(domain: str):
+    html = wants_html()
     state = _STATE
-    user_id = auth_user(state)
-    if user_id is None:
+    user = current_user(state)
+    if user is None:
+        if html:
+            return login_redirect()
         return unauthenticated()
     try:
         normalised = normalise_domain(domain)
@@ -1020,8 +1201,13 @@ def get_dossier(domain: str):
     with state.lock:
         dossier = state.dossiers.get(normalised)
         if dossier is None:
+            if html:
+                return html_response(dossier_page(None, normalised, user=user, not_found=True))
             return not_found("no such dossier")
-        return json_response(dossier_view(dossier))
+        data = dossier_view(dossier)
+    if html:
+        return html_response(dossier_page(data, normalised, user=user))
+    return json_response(data)
 
 
 @app.post("/dossiers/<path:domain>/refresh")
@@ -1056,6 +1242,98 @@ def refresh_dossier(domain: str):
         response_body = dossier_brief(dossier)
         state.idem[idem_key] = {"body": canonical, "response": copy.deepcopy(response_body)}
     return json_response(response_body, 202)
+
+
+@app.get("/")
+def home():
+    state = _STATE
+    user = current_user(state)
+    if user is None:
+        return login_redirect()
+    query = request.args.get("q")
+    items = _filtered_dossiers(state, query)
+    listing = [
+        {
+            "domain": item["domain"],
+            "legal_name": item["fields"].get("legal_name", {}).get("value"),
+            "state": item["state"],
+        }
+        for item in items
+    ]
+    return html_response(list_page(listing, query or "", user=user))
+
+
+@app.get("/contested")
+def contested_screen():
+    state = _STATE
+    user = current_user(state)
+    if user is None:
+        return login_redirect()
+    with state.lock:
+        dossiers = [
+            dossier_view(dossier)
+            for dossier in sorted(state.dossiers.values(), key=lambda d: d["domain"])
+        ]
+    items = []
+    for data in dossiers:
+        for field in FIELDS:
+            entry = data["fields"].get(field) or {}
+            if entry.get("status") == "contested":
+                items.append({"domain": data["domain"], "field": field, "field_data": entry})
+    return html_response(contested_page(items, user=user))
+
+
+def _form_payload() -> dict:
+    if request.is_json:
+        payload = request.get_json(silent=True)
+        return payload if isinstance(payload, dict) else {}
+    return request.form.to_dict()
+
+
+@app.route("/signup", methods=["GET", "POST"])
+def signup_screen():
+    state = _STATE
+    user = current_user(state)
+    if request.method == "GET":
+        if user is not None:
+            return redirect("/", code=303)
+        return html_response(auth_page("signup"))
+    result = _create_account(_form_payload())
+    if isinstance(result, Response):
+        return html_response(auth_page("signup", error=_error_message(result), user=user))
+    body, _status = result
+    response = redirect("/", code=303)
+    response.set_cookie(SESSION_COOKIE, body["token"], httponly=True, samesite="Lax", path="/")
+    return response
+
+
+@app.route("/login", methods=["GET", "POST"])
+def login_screen():
+    state = _STATE
+    user = current_user(state)
+    if request.method == "GET":
+        if user is not None:
+            return redirect("/", code=303)
+        return html_response(auth_page("login"))
+    result = _authenticate(_form_payload())
+    if isinstance(result, Response):
+        return html_response(auth_page("login", error=_error_message(result), user=user))
+    body, _status = result
+    response = redirect("/", code=303)
+    response.set_cookie(SESSION_COOKIE, body["token"], httponly=True, samesite="Lax", path="/")
+    return response
+
+
+@app.post("/logout")
+def logout_screen():
+    state = _STATE
+    token = bearer_token() or request.cookies.get(SESSION_COOKIE)
+    if token:
+        with state.lock:
+            state.tokens.pop(token, None)
+    response = redirect("/login", code=303)
+    response.delete_cookie(SESSION_COOKIE, path="/")
+    return response
 
 
 @app.errorhandler(HTTPException)

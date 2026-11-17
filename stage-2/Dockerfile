@@ -10,7 +10,7 @@ COPY requirements.txt ./
 RUN pip install --no-cache-dir --upgrade pip && \
     pip install --no-cache-dir -r requirements.txt
 
-COPY server.py dossier_support.py ./
+COPY server.py dossier_support.py pages.py selection.py webui.py ./
 
 EXPOSE 8080
 
