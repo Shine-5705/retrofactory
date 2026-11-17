@@ -429,7 +429,8 @@ DOSSIER_SCRIPT = r"""
 
   async function doRefresh(){
     const btn=qs('[data-testid="dossier-refresh"]');
-    if(btn)btn.disabled=true;
+    let label='';
+    if(btn){label=btn.textContent;btn.disabled=true;btn.setAttribute('aria-busy','true');btn.textContent='Refreshing\u2026';}
     clearNotice('refresh-error');clearNotice('refresh-uncertain');
     const key=pendingRefresh?pendingRefresh.key:newKey();
     try{
@@ -451,7 +452,7 @@ DOSSIER_SCRIPT = r"""
       pendingRefresh={key:key};
       showNotice('refresh-uncertain','The refresh went through but its reply was lost. Retry to see the result.','uncertain');
     }finally{
-      if(btn)btn.disabled=false;
+      if(btn){btn.disabled=false;btn.removeAttribute('aria-busy');btn.textContent=label;}
     }
   }
 
@@ -473,18 +474,17 @@ LIST_SCRIPT = r"""
   const empty=qs('[data-testid="empty-dossiers"]');
   let pending=null;
 
+  const allItems=list?Array.from(list.children).map(function(item){
+    return {html:item.outerHTML,text:(item.getAttribute('data-search')||'').toLowerCase()};
+  }):[];
+
   function filter(){
     if(!search||!list)return;
     const needle=(search.value||'').trim().toLowerCase();
-    let shown=0;
-    Array.from(list.children).forEach(function(item){
-      const text=(item.getAttribute('data-search')||'').toLowerCase();
-      const match=!needle||text.indexOf(needle)>=0;
-      item.hidden=!match;
-      if(match)shown++;
-    });
-    list.hidden=shown===0;
-    if(empty)empty.hidden=shown!==0;
+    const matches=allItems.filter(function(entry){return !needle||entry.text.indexOf(needle)>=0;});
+    list.innerHTML=matches.map(function(entry){return entry.html;}).join('');
+    list.hidden=matches.length===0;
+    if(empty)empty.hidden=matches.length!==0;
   }
   if(search){search.addEventListener('input',filter);filter();}
 
@@ -496,7 +496,8 @@ LIST_SCRIPT = r"""
       const button=qs('[data-testid="research-submit"]');
       const key=pending?pending.key:newKey();
       const body=pending?pending.body:JSON.stringify({domain:input?input.value:''});
-      if(button)button.disabled=true;
+      let label='';
+      if(button){label=button.textContent;button.disabled=true;button.setAttribute('aria-busy','true');button.textContent='Researching\u2026';}
       try{
         const r=await fetch('/dossiers',{
           method:'POST',
@@ -518,7 +519,7 @@ LIST_SCRIPT = r"""
         pending={key:key,body:body};
         showNotice('research-uncertain','The request may have gone through but its reply was lost. Submit again to retry safely.','uncertain');
       }finally{
-        if(button)button.disabled=false;
+        if(button){button.disabled=false;button.removeAttribute('aria-busy');button.textContent=label;}
       }
     });
   }

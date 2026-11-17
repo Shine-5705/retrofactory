@@ -1251,7 +1251,7 @@ def home():
     if user is None:
         return login_redirect()
     query = request.args.get("q")
-    items = _filtered_dossiers(state, query)
+    items = _filtered_dossiers(state, None)
     listing = [
         {
             "domain": item["domain"],
