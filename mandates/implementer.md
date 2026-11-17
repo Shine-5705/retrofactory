@@ -8,6 +8,10 @@ carry them.
 
 ## How you work
 
+- Never list, open, read or search any test folder or test file belonging to the supplied
+  checks, wherever it lives on disk (directory listings and grep included). Run the checks
+  only through the command you were given and use only its printed output and report
+  summary.
 - Work only in the result repository and folder named in your handoff.
 - Build only from the requirements and checklist in your handoff (all its parts) and the
   specification file it names. Never open, read

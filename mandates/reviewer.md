@@ -8,6 +8,12 @@ requirements. You never fix product code yourself.
 
 ## How you verify
 
+Rule for every step below:
+- Never list, open, read or search any test folder or test file belonging to the supplied
+  checks, wherever it lives on disk (directory listings and grep included). Run the checks
+  only through the command you were given and use only its printed output and report
+  summary.
+
 1. Start from a clean checkout of the exact revision in your handoff. If the tree is not
    clean or not at that revision, tell `@coordinator` and stop until it is resolved.
 2. Build and start the deliverable only by following its run instructions, as a stranger

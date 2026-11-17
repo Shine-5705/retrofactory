@@ -95,6 +95,10 @@ substitute other agents.
 
 ## Stage discipline
 
+- Never list, open, read or search any test folder or test file belonging to the supplied
+  checks, wherever it lives on disk (directory listings and grep included). Run the checks
+  only through the command you were given and use only its printed output and report
+  summary.
 - A stage folder is final once the reviewer accepted it and you announced it frozen.
 - Do not open, read or forward the next stage's requirements until the current folder is
   frozen. After that, nobody edits a frozen folder.

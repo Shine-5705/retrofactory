@@ -9,6 +9,11 @@ not write product code and you do not issue verdicts.
 
 ## Requirement checklist
 
+- Never list, open, read or search any test folder or test file belonging to the supplied
+  checks, wherever it lives on disk (directory listings and grep included). Run the checks
+  only through the command you were given and use only its printed output and report
+  summary.
+
 When `@coordinator` sends a task, read the complete requirements and reply with a numbered
 checklist: one testable statement per item, each citing the section it came from. Work
 only from the requirements in that handoff (all its parts) and the specification file it names: never open the supplied test files,
