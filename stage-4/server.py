@@ -1,4 +1,4 @@
-"""Dossier service (stage 3): change over time, executives, history and a feed.
+"""Dossier service (stage 4): independent origins, investors and batches.
 
 A small threaded HTTP service.  All state is held in memory and mirrored to the
 container filesystem so it survives a container restart.  Background builds
@@ -35,6 +35,7 @@ from selection import (
     ALL_FIELDS,
     assemble_executives,
     assemble_field,
+    assemble_investors,
     collect_candidates,
     imported_field,
     rebuild_field_from_candidates,
@@ -141,6 +142,9 @@ def empty_field() -> dict:
         "candidates": [],
         "true_from": None,
         "learned_at": None,
+        "origins": [],
+        "corroborated": False,
+        "corroborated_since": None,
     }
 
 
@@ -165,6 +169,8 @@ class State:
         self.next_dossier = 1
         self.next_seq = 1
         self.next_build_seq = 1
+        self.next_batch = 1
+        self.batches: dict[str, dict] = {}
         self.feed: list[dict] = []
 
     def now(self) -> datetime:
@@ -225,6 +231,7 @@ def _serialise_dossier(dossier: dict, building_as_before: bool = True) -> dict:
         "last_outcome": dossier.get("last_outcome"),
         "researched_at": dossier.get("researched_at"),
         "spent_units": spent,
+        "live_spent": dossier.get("spent_units", spent),
         "base_spent": dossier.get("base_spent", spent),
         "fields": copy.deepcopy(dossier["fields"]),
         "builds": copy.deepcopy(dossier.get("builds", [])),
@@ -264,6 +271,8 @@ def _serialise_state(state: State) -> dict:
         "idempotency": idempotency,
         "next_user": state.next_user,
         "next_dossier": state.next_dossier,
+        "next_batch": state.next_batch,
+        "batches": copy.deepcopy(state.batches),
         "stage3": {
             "feed": copy.deepcopy(state.feed),
             "next_seq": state.next_seq,
@@ -506,8 +515,17 @@ def _reserve(state: State, dossier: dict, cost: int) -> bool:
     with state.lock:
         if dossier["build_spent"] + cost > MAX_UNITS:
             return False
+        batch_id = dossier.get("build_batch_id")
+        if batch_id is not None:
+            batch = state.batches.get(batch_id)
+            if batch is not None and batch["spent_units"] + cost > batch["budget_units"]:
+                return False
         dossier["build_spent"] += cost
         dossier["spent_units"] += cost
+        if batch_id is not None:
+            batch = state.batches.get(batch_id)
+            if batch is not None:
+                batch["spent_units"] += cost
         return True
 
 
@@ -515,6 +533,11 @@ def _refund(state: State, dossier: dict, cost: int) -> None:
     with state.lock:
         dossier["build_spent"] = max(0, dossier["build_spent"] - cost)
         dossier["spent_units"] = max(0, dossier["spent_units"] - cost)
+        batch_id = dossier.get("build_batch_id")
+        if batch_id is not None:
+            batch = state.batches.get(batch_id)
+            if batch is not None:
+                batch["spent_units"] = max(0, batch["spent_units"] - cost)
 
 
 def _timeout_for(deadline: float, cap: float) -> float | None:
@@ -557,10 +580,13 @@ def _with_429(state: State, dossier: dict, cost: int, deadline: Deadline, call):
             _refund(state, dossier, cost)
             return None
         try:
-            return call(deadline)
+            result = call(deadline)
+            persist_state(state)
+            return result
         except Exception as exc:
             if _is_429(exc):
                 _refund(state, dossier, cost)
+                persist_state(state)
                 attempts += 1
                 if attempts > 3:
                     return None
@@ -569,6 +595,7 @@ def _with_429(state: State, dossier: dict, cost: int, deadline: Deadline, call):
                 continue
             if _exception_was_refused(exc):
                 _refund(state, dossier, cost)
+            persist_state(state)
             return None
 
 
@@ -714,11 +741,175 @@ def _assign_learned(dossier: dict, raw: dict[str, list[dict]], build_time: str) 
     for field in ALL_FIELDS:
         for candidate in raw.get(field, []):
             key = candidate_identity(field, candidate)
-            if key in gathered:
-                candidate["learned_at"] = gathered[key]
+            record = gathered.get(key)
+            if isinstance(record, dict):
+                candidate["learned_at"] = record.get("at") or build_time
+            elif isinstance(record, str):
+                candidate["learned_at"] = record
             else:
-                gathered[key] = build_time
+                gathered[key] = {
+                    "at": build_time,
+                    "origin": candidate.get("origin"),
+                    "value": candidate.get("value"),
+                    "field": field,
+                }
                 candidate["learned_at"] = build_time
+
+
+def _member_names_of(entry: dict) -> list[tuple[str, object]]:
+    """Return (title-or-name, member value) pairs for a member field."""
+    pairs: list[tuple[str, object]] = []
+    value = entry.get("value")
+    if not isinstance(value, list):
+        return pairs
+    for member in value:
+        if isinstance(member, str):
+            pairs.append(("", member))
+            continue
+        if not isinstance(member, dict):
+            continue
+        title = member.get("title")
+        name = member.get("name")
+        if isinstance(title, str) and isinstance(name, str):
+            pairs.append((title, name))
+        elif isinstance(name, str):
+            pairs.append(("", name))
+    return pairs
+
+
+def _standing_origins(
+    gathered: dict,
+    field: str,
+    value: object,
+    since: str | None,
+    member: tuple | None,
+    until: str | None = None,
+) -> set[str]:
+    """Origins of candidates for a value gathered in ``[since, until]``.
+
+    ``since`` is normally the time the value became selected (its ``learned_at``)
+    and ``until`` bounds a candidate build for ``corroborated_since``.  Records
+    are never removed, so standing origins accumulate across builds even when a
+    later build does not re-gather them (S4-22/S4-30).
+    """
+    origins: set[str] = set()
+    try:
+        since_dt = parse_rfc3339(since) if since else None
+    except Exception:
+        since_dt = None
+    try:
+        until_dt = parse_rfc3339(until) if until else None
+    except Exception:
+        until_dt = None
+    for key, record in gathered.items():
+        if not isinstance(record, dict) or record.get("field") != field:
+            continue
+        if not same_json_value(record.get("value"), value):
+            continue
+        origin = record.get("origin")
+        if not isinstance(origin, str) or not origin:
+            continue
+        at = parse_rfc3339(record.get("at"))
+        if since_dt is not None and (at is None or at < since_dt):
+            continue
+        if until_dt is not None and (at is None or at > until_dt):
+            continue
+        if member is not None:
+            if not isinstance(key, str):
+                continue
+            if member[0] and member[0] not in key:
+                continue
+        origins.add(origin)
+    return origins
+
+
+def _member_current_origins(entry: dict, field: str) -> dict[tuple, set[str]]:
+    """Per-member origins from the field's current candidates (S4-27/S4-28)."""
+    members = _member_names_of(entry)
+    result: dict[tuple, set[str]] = {}
+    for m in members:
+        origins: set[str] = set()
+        for candidate in entry.get("candidates") or []:
+            if not isinstance(candidate, dict):
+                continue
+            if m[0] and candidate.get("title") != m[0]:
+                continue
+            if not same_json_value(candidate.get("value"), m[1]):
+                continue
+            origin = candidate.get("origin")
+            if isinstance(origin, str) and origin:
+                origins.add(origin)
+        result[m] = origins
+    return result
+
+
+def _decorate_corroboration(
+    dossier: dict, fields: dict[str, dict], build_time: str
+) -> None:
+    """Fill origins/corroborated/corroborated_since on every field.
+
+    ``origins`` and ``corroborated`` come from the field's current candidates
+    (S4-19/S4-20 and S4-27/S4-28); ``corroborated_since`` is the earliest ready
+    build after which the selected value has had two or more standing origins,
+    counted from the value's ``learned_at`` (S4-21/S4-22/S4-29/S4-30, A3).
+    """
+    gathered = dossier.get("gathered") or {}
+    build_times = sorted(
+        dt for dt in (
+            [parse_rfc3339(b.get("time")) for b in dossier.get("builds", [])
+             if b.get("outcome") == "ready"]
+            + [parse_rfc3339(build_time)]
+        )
+        if dt is not None
+    )
+    for field in ALL_FIELDS:
+        entry = fields.get(field)
+        if not isinstance(entry, dict):
+            continue
+        if entry.get("value") is None:
+            entry["origins"] = []
+            entry["corroborated"] = False
+            entry["corroborated_since"] = None
+            continue
+        learned_at = entry.get("learned_at")
+        if field in ("executives", "investors"):
+            current = _member_current_origins(entry, field)
+            entry["origins"] = sorted(set().union(*current.values())) if current else []
+            entry["corroborated"] = bool(current) and all(len(o) >= 2 for o in current.values())
+            since = None
+            for stamp in build_times:
+                iso = now_iso(stamp)
+                if all(
+                    len(_standing_origins(gathered, field, m[1], learned_at, m, iso)) >= 2
+                    for m in current
+                ):
+                    since = iso
+                    break
+            entry["corroborated_since"] = since
+        else:
+            value = entry.get("value")
+            origins = _origins_from_candidates(
+                [c for c in entry.get("candidates") or []
+                 if isinstance(c, dict) and same_json_value(c.get("value"), value)]
+            )
+            entry["origins"] = origins
+            entry["corroborated"] = len(origins) >= 2
+            since = None
+            for stamp in build_times:
+                iso = now_iso(stamp)
+                if len(_standing_origins(gathered, field, value, learned_at, None, iso)) >= 2:
+                    since = iso
+                    break
+            entry["corroborated_since"] = since
+
+
+def _origins_from_candidates(candidates: list[dict]) -> list[str]:
+    origins = set()
+    for candidate in candidates:
+        origin = candidate.get("origin")
+        if isinstance(origin, str) and origin:
+            origins.add(origin)
+    return sorted(origins)
 
 
 def _page_versions(pages: list[dict], raw: dict[str, list[dict]], domain: str) -> list[dict]:
@@ -755,6 +946,7 @@ def _page_versions(pages: list[dict], raw: dict[str, list[dict]], domain: str) -
                     "true_from": candidate.get("true_from"),
                     "retrieved_at": candidate.get("retrieved_at"),
                     "learned_at": candidate.get("learned_at"),
+                    "origin": candidate.get("origin"),
                 }
             )
     return list(versions.values())
@@ -800,9 +992,48 @@ def _exec_entry_type(earlier: dict, new: dict) -> str:
     return "correction"
 
 
+def _investor_member_dates(entry: dict) -> dict[str, str | None]:
+    """Earliest non-null ``true_from`` per member name (S4-46)."""
+    collected: dict[str, list[str]] = {}
+    for candidate in entry.get("candidates") or []:
+        if not isinstance(candidate, dict) or not candidate.get("selected"):
+            continue
+        name = candidate.get("value")
+        stamp = candidate.get("true_from")
+        if isinstance(name, str) and isinstance(stamp, str) and stamp:
+            collected.setdefault(name, []).append(stamp)
+    dates: dict[str, str | None] = {}
+    for member in entry.get("value") or []:
+        if isinstance(member, str):
+            values = collected.get(member)
+            dates[member] = min(values) if values else None
+    return dates
+
+
+def _investor_entry_type(earlier: dict, new: dict) -> str:
+    old_names = set(_investor_member_dates(earlier))
+    new_names = set(_investor_member_dates(new))
+    old_dates = _investor_member_dates(earlier)
+    new_dates = _investor_member_dates(new)
+    old_field_date = earlier.get("true_from")
+    new_field_date = new.get("true_from")
+    corrections = []
+    for name in new_names - old_names:
+        date = new_dates.get(name)
+        if date is not None and old_field_date is not None and str(date) <= str(old_field_date):
+            corrections.append(name)
+    only_new = new_names - old_names
+    only_old = old_names - new_names
+    if only_new and not only_old and len(corrections) == len(only_new):
+        return "correction"
+    return "change"
+
+
 def _entry_type(field: str, earlier: dict, new: dict) -> str:
     if field == "executives":
         return _exec_entry_type(earlier, new)
+    if field == "investors":
+        return _investor_entry_type(earlier, new)
     old_value = earlier.get("value")
     new_value = new.get("value")
     if old_value is None or new_value is None:
@@ -830,6 +1061,7 @@ def _finish_ready(
     for field in FIELDS:
         new_fields[field] = assemble_field(raw[field])
     new_fields["executives"] = assemble_executives(raw["executives"])
+    new_fields["investors"] = assemble_investors(raw["investors"])
 
     for field in ALL_FIELDS:
         entry = new_fields[field]
@@ -893,6 +1125,8 @@ def _finish_ready(
         state.next_seq += 1
         state.feed.append(entry)
 
+    _decorate_corroboration(dossier, new_fields, build_time)
+
     dossier["fields"] = new_fields
     dossier["researched_at"] = build_time
     dossier["state"] = "ready"
@@ -907,6 +1141,109 @@ def _finish_ready(
             "fields": copy.deepcopy(new_fields),
             "versions": versions,
         }
+    )
+
+
+def _resolve_page_origins(
+    state: State, dossier: dict, pages: list[dict], deadline: Deadline, domain: str
+) -> None:
+    """Assign ``origin_resolved`` to each page by origin rules 1..4.
+
+    Rule 2 follows at most three Canonical URLs in a row, fetching each original
+    through the provider.  A fourth hop, or a URL no provider serves, falls back
+    to that URL's host (S4-15/S4-16, A2).
+    """
+    from pages import parse_headers, url_host
+
+    by_url: dict[str, dict] = {}
+    for page in pages:
+        url = (page.get("url") or "").strip()
+        if url:
+            by_url.setdefault(url, page)
+
+    def resolve(
+        text: str, url: str, hops: int, visiting: frozenset[str]
+    ) -> str | None:
+        headers = parse_headers(text)
+        first = None
+        raw = headers.get("first-published-by")
+        if raw:
+            first = pages_normalise_host(raw)
+        if first:
+            return first
+        canonical = headers.get("canonical")
+        if isinstance(canonical, str) and canonical.strip():
+            target = canonical.strip()
+            if target == url:
+                canonical = None
+        else:
+            canonical = None
+        if canonical:
+            if hops >= 3 or canonical in visiting:
+                return url_host(canonical) or None
+            already = by_url.get(canonical)
+            target_text = (
+                already.get("text")
+                if already is not None and already.get("text")
+                else _fetch_page_text(state, dossier, canonical, deadline)
+            )
+            if target_text is None:
+                return url_host(canonical) or None
+            result = resolve(target_text, canonical, hops + 1, visiting | {canonical})
+            return result or url_host(canonical) or None
+        from pages import normalise_host, is_lookalike
+
+        if is_lookalike(url, headers):
+            return domain
+        registrant = normalise_host(headers.get("registrant"))
+        if registrant:
+            return registrant
+        return url_host(url) or None
+
+    for page in pages:
+        url = (page.get("url") or "").strip()
+        text = page.get("text") or ""
+        if not url or not text:
+            continue
+        origin = resolve(text, url, 0, frozenset({url}))
+        if origin:
+            page["origin_resolved"] = origin
+
+
+def pages_normalise_host(raw: str) -> str | None:
+    from pages import normalise_host
+
+    return normalise_host(raw)
+
+
+def _fetch_page_text(
+    state: State, dossier: dict, url: str, deadline: Deadline
+) -> str | None:
+    response = _do_extract(state, dossier, url, deadline)
+    if response is None:
+        return None
+    pages = _extract_text(response, url)
+    for page in pages:
+        if (page.get("url") or "").strip() == url and page.get("text"):
+            return page["text"]
+    return pages[0]["text"] if pages else None
+
+
+def _finish_batch_build(state: State, dossier: dict) -> None:
+    batch_id = dossier.get("build_batch_id")
+    if not batch_id:
+        return
+    batch = state.batches.get(batch_id)
+    if batch is None:
+        return
+    for item in batch.get("dossiers", []):
+        if item.get("domain") == dossier["domain"]:
+            item["state"] = dossier["state"]
+            break
+    batch["state"] = (
+        "done"
+        if all(item.get("state") in ("ready", "failed") for item in batch.get("dossiers", []))
+        else "running"
     )
 
 
@@ -968,6 +1305,7 @@ def _build_worker(state: State, dossier: dict, build_time: datetime, generation:
                 any_success = True
                 pages.extend(_extract_text(extracted, url))
 
+        _resolve_page_origins(state, dossier, pages, deadline, domain)
         raw = collect_candidates(pages, domain, company, build_iso)
         _assign_learned(dossier, raw, build_iso)
         versions = _page_versions(pages, raw, domain)
@@ -996,14 +1334,18 @@ def _build_worker(state: State, dossier: dict, build_time: datetime, generation:
                 }
             )
             state.next_build_seq += 1
+        _finish_batch_build(state, dossier)
     persist_state(state)
 
 
-def start_build(state: State, dossier: dict, build_time: datetime) -> None:
+def start_build(
+    state: State, dossier: dict, build_time: datetime, batch_id: str | None = None
+) -> None:
     dossier["building"] = True
     dossier["build_gen"] += 1
     dossier["base_spent"] = dossier["spent_units"]
     dossier["build_spent"] = 0
+    dossier["build_batch_id"] = batch_id
     dossier["state"] = "building"
     generation = dossier["build_gen"]
     thread = threading.Thread(
@@ -1106,6 +1448,8 @@ def _export_state(state: State) -> dict:
             "idempotency": idempotency,
             "next_user": state.next_user,
             "next_dossier": state.next_dossier,
+            "next_batch": state.next_batch,
+            "batches": copy.deepcopy(state.batches),
             "stage3": {
                 "feed": copy.deepcopy(state.feed),
                 "next_seq": state.next_seq,
@@ -1151,6 +1495,51 @@ def _legacy_stage2_candidates(entry: dict) -> list[dict]:
     return result
 
 
+def _legacy_origin(candidate: dict) -> str:
+    """S4-25: imported candidates with no origin take their URL's host."""
+    from pages import url_host
+
+    return url_host(candidate.get("url") or "") or ""
+
+
+def _import_gathered(builds: list[dict], old_gathered: dict, researched_at: str | None) -> dict:
+    """Rebuild gathered records from imported builds (S4-23/S4-24)."""
+    gathered: dict = {}
+    for build in builds:
+        when = build.get("time")
+        if build.get("outcome") != "ready" or not isinstance(when, str):
+            continue
+        for field in ALL_FIELDS:
+            for candidate in (build.get("fields") or {}).get(field, {}).get("candidates") or []:
+                if not isinstance(candidate, dict):
+                    continue
+                key = candidate_identity(field, candidate)
+                at = when
+                gathered[key] = {
+                    "at": at,
+                    "origin": candidate.get("origin") or _legacy_origin(candidate),
+                    "value": candidate.get("value"),
+                    "field": field,
+                }
+    for key, record in old_gathered.items():
+        if key not in gathered:
+            if isinstance(record, dict):
+                gathered[key] = record
+            else:
+                gathered[key] = {"at": record, "origin": "", "value": None, "field": ""}
+    return gathered
+
+
+def _decorate_imported_fields(dossier: dict) -> None:
+    """Give imported fields (current and per-build) stage-4 corroboration keys."""
+    fields = dossier.get("fields") or {}
+    _decorate_corroboration(dossier, fields, dossier.get("researched_at") or "")
+    for build in dossier.get("builds") or []:
+        bf = build.get("fields")
+        if isinstance(bf, dict):
+            _decorate_corroboration(dossier, bf, build.get("time") or "")
+
+
 def _restore_stage3_dossier(item: dict, state: State) -> dict | None:
     dossier_id = item.get("id")
     domain = item.get("domain")
@@ -1160,7 +1549,8 @@ def _restore_stage3_dossier(item: dict, state: State) -> dict | None:
     if outcome not in ("ready", "failed"):
         return None
     fields = item.get("fields")
-    if not isinstance(fields, dict) or set(fields) != set(ALL_FIELDS):
+    stage3_fields = set(FIELDS) | {"executives"}
+    if not isinstance(fields, dict) or not stage3_fields.issubset(set(fields)):
         return None
     builds = item.get("builds")
     history = item.get("history")
@@ -1169,7 +1559,7 @@ def _restore_stage3_dossier(item: dict, state: State) -> dict | None:
         return None
     if not isinstance(gathered, dict):
         gathered = {}
-    spent = item.get("spent_units")
+    spent = item.get("live_spent", item.get("spent_units"))
     researched_at = item.get("researched_at")
     if not isinstance(spent, int) or spent < 0:
         return None
@@ -1181,23 +1571,67 @@ def _restore_stage3_dossier(item: dict, state: State) -> dict | None:
         if not isinstance(entries, list):
             entries = []
         clean_history[field] = copy.deepcopy(entries)
-    return {
+    clean_history["investors"] = []
+
+    clean_fields = copy.deepcopy(fields)
+    for field in ALL_FIELDS:
+        if field not in clean_fields:
+            clean_fields[field] = empty_field()
+    clean_fields["investors"] = empty_field()
+    for field in ALL_FIELDS:
+        entry = clean_fields.get(field)
+        if not isinstance(entry, dict):
+            continue
+        for candidate in entry.get("candidates") or []:
+            if not isinstance(candidate, dict):
+                continue
+            if not isinstance(candidate.get("origin"), str) or not candidate["origin"]:
+                candidate["origin"] = _legacy_origin(candidate)
+        if entry.get("value") is not None:
+            entry["origins"] = _origins_from_candidates(entry.get("candidates") or [])
+            entry["corroborated"] = len(entry["origins"]) >= 2
+        else:
+            entry["origins"] = []
+            entry["corroborated"] = False
+        entry["corroborated_since"] = None
+
+    clean_builds = copy.deepcopy(builds)
+    for build in clean_builds:
+        bf = build.get("fields")
+        if isinstance(bf, dict):
+            bf["investors"] = empty_field()
+            for field in ALL_FIELDS:
+                entry = bf.get(field)
+                if not isinstance(entry, dict):
+                    continue
+                for candidate in entry.get("candidates") or []:
+                    if isinstance(candidate, dict) and (
+                        not isinstance(candidate.get("origin"), str) or not candidate["origin"]
+                    ):
+                        candidate["origin"] = _legacy_origin(candidate)
+        for version in build.get("versions") or []:
+            for candidate in version.get("candidates") or []:
+                if not isinstance(candidate.get("origin"), str) or not candidate["origin"]:
+                    candidate["origin"] = _legacy_origin(candidate)
+    dossier = {
         "id": dossier_id,
         "domain": domain,
         "state": outcome,
         "last_outcome": item.get("last_outcome") or outcome,
-        "fields": copy.deepcopy(fields),
+        "fields": clean_fields,
         "researched_at": researched_at,
         "spent_units": spent,
         "base_spent": spent,
         "build_spent": 0,
         "building": False,
         "build_gen": 0,
-        "builds": copy.deepcopy(builds),
+        "builds": clean_builds,
         "history": clean_history,
-        "gathered": dict(gathered),
+        "gathered": _import_gathered(clean_builds, gathered, researched_at),
         "has_ready": bool(item.get("has_ready")),
     }
+    _decorate_imported_fields(dossier)
+    return dossier
 
 
 def _import_legacy_dossier(item: dict, state: State) -> dict | None:
@@ -1213,7 +1647,7 @@ def _import_legacy_dossier(item: dict, state: State) -> dict | None:
         return None
     if not all(_valid_field_entry(fields[field]) for field in FIELDS):
         return None
-    spent = item.get("spent_units")
+    spent = item.get("live_spent", item.get("spent_units"))
     researched_at = item.get("researched_at")
     if not isinstance(spent, int) or spent < 0:
         return None
@@ -1250,12 +1684,34 @@ def _import_legacy_dossier(item: dict, state: State) -> dict | None:
             rebuilt["learned_at"] = None
         assembled[field] = rebuilt
     assembled["executives"] = empty_field()
+    assembled["investors"] = empty_field()
+    for field in ALL_FIELDS:
+        entry = assembled.get(field)
+        if not isinstance(entry, dict):
+            continue
+        for candidate in entry.get("candidates") or []:
+            if isinstance(candidate, dict) and (
+                not isinstance(candidate.get("origin"), str) or not candidate["origin"]
+            ):
+                candidate["origin"] = _legacy_origin(candidate)
+        if entry.get("value") is not None:
+            entry["origins"] = _origins_from_candidates(entry.get("candidates") or [])
+            entry["corroborated"] = len(entry["origins"]) >= 2
+        else:
+            entry["origins"] = []
+            entry["corroborated"] = False
+        entry["corroborated_since"] = None
     dossier["fields"] = assembled
 
     for field in ALL_FIELDS:
         for candidate in assembled[field].get("candidates") or []:
             key = candidate_identity(field, candidate)
-            dossier["gathered"][key] = candidate.get("learned_at") or researched_at
+            dossier["gathered"][key] = {
+                "at": candidate.get("learned_at") or candidate.get("retrieved_at") or researched_at,
+                "origin": candidate.get("origin") or _legacy_origin(candidate),
+                "value": candidate.get("value"),
+                "field": field,
+            }
 
     for field in FIELDS:
         entry = assembled[field]
@@ -1296,6 +1752,7 @@ def _import_legacy_dossier(item: dict, state: State) -> dict | None:
                         "true_from": candidate.get("true_from"),
                         "retrieved_at": candidate.get("retrieved_at"),
                         "learned_at": candidate.get("learned_at"),
+                        "origin": candidate.get("origin"),
                     }
                 )
         dossier["builds"].append(
@@ -1310,6 +1767,7 @@ def _import_legacy_dossier(item: dict, state: State) -> dict | None:
         )
         state.next_build_seq += 1
         dossier["has_ready"] = True
+    _decorate_imported_fields(dossier)
     return dossier
 
 
@@ -1388,6 +1846,22 @@ def _state_from_export(payload: object, clock: datetime | None) -> State | None:
         next_dossier = 1
     state.next_user = next_user
     state.next_dossier = next_dossier
+
+    next_batch = payload.get("next_batch", 1)
+    state.next_batch = next_batch if isinstance(next_batch, int) and next_batch >= 1 else 1
+    batches = payload.get("batches")
+    if isinstance(batches, dict):
+        state.batches = copy.deepcopy(batches)
+    for batch in state.batches.values():
+        for item in batch.get("dossiers", []):
+            dossier = state.dossiers.get(item.get("domain"))
+            if dossier is not None:
+                item["state"] = dossier["state"]
+        batch["state"] = (
+            "done"
+            if all(item.get("state") in ("ready", "failed") for item in batch.get("dossiers", []))
+            else "running"
+        )
 
     if stage3 is not None:
         feed = stage3.get("feed")
@@ -1623,6 +2097,122 @@ def login():
     if isinstance(result, Response):
         return result
     return json_response(result[0], result[1])
+
+
+def _batch_view(state: State, batch: dict) -> dict:
+    with state.lock:
+        items = []
+        for item in batch["dossiers"]:
+            dossier = state.dossiers.get(item.get("domain"))
+            items.append({"domain": item["domain"], "state": dossier["state"] if dossier else item["state"]})
+        batch_state = (
+            "done" if all(item["state"] in ("ready", "failed") for item in items) else "running"
+        )
+        return {
+            "batch_id": batch["id"],
+            "state": batch_state,
+            "budget_units": batch["budget_units"],
+            "spent_units": batch["spent_units"],
+            "dossiers": items,
+        }
+
+
+@app.post("/batches")
+def create_batch():
+    state = _STATE
+    user_id = auth_user(state)
+    if user_id is None:
+        return unauthenticated()
+    key, key_error = idempotency_header()
+    if key_error is not None:
+        return key_error
+    body, ok = read_json_body()
+    if not ok:
+        return malformed("unparseable batch body")
+    if not isinstance(body, dict):
+        return malformed("batch body must be an object")
+
+    domains = body.get("domains")
+    budget = body.get("budget_units")
+    canonical = canonical_body({"domains": domains, "budget_units": budget})
+    idem_key = (user_id, "POST", request.path, key)
+
+    with state.lock:
+        record = state.idem.get(idem_key)
+        if record is not None:
+            if record["body"] == canonical:
+                return json_response(copy.deepcopy(record["response"]), 200)
+            return error_response(409, "idempotency_key_reuse", "key reused with a different body")
+
+        if "domains" not in body:
+            return validation_error("domains is required")
+        if "budget_units" in body and type(budget) is not int:
+            return validation_error("budget_units must be an integer from 1 to 100000")
+        if not isinstance(domains, list):
+            return malformed("domains must be an array")
+        if len(domains) == 0 or len(domains) > 50:
+            return validation_error("domains must have 1 to 50 entries")
+        normalised: list[str] = []
+        for entry in domains:
+            if not isinstance(entry, str):
+                return validation_error("each domain must be a string")
+            try:
+                value = normalise_domain(entry)
+            except ValueError:
+                return validation_error("invalid domain")
+            if value in normalised:
+                return validation_error("duplicate domain")
+            normalised.append(value)
+        if "budget_units" not in body:
+            return validation_error("budget_units is required")
+        if type(budget) is not int or budget < 1 or budget > 100000:
+            return validation_error("budget_units must be an integer from 1 to 100000")
+
+        batch_id, state.next_batch = _next_id(
+            "b", state.next_batch, set(state.batches)
+        )
+        items = []
+        for domain in normalised:
+            existing = state.dossiers.get(domain)
+            if existing is not None:
+                item = {"domain": domain, "state": existing["state"]}
+            else:
+                dossier_id, state.next_dossier = _next_id(
+                    "d", state.next_dossier, set(d["id"] for d in state.dossiers.values())
+                )
+                dossier = _new_dossier(dossier_id, domain)
+                state.dossiers[domain] = dossier
+                start_build(state, dossier, state.now(), batch_id=batch_id)
+                item = {"domain": domain, "state": dossier["state"]}
+            items.append(item)
+        batch = {
+            "id": batch_id,
+            "user_id": user_id,
+            "state": "done"
+            if all(item["state"] in ("ready", "failed") for item in items)
+            else "running",
+            "budget_units": budget,
+            "spent_units": 0,
+            "dossiers": items,
+        }
+        state.batches[batch_id] = batch
+        response_body = _batch_view(state, batch)
+        state.idem[idem_key] = {"body": canonical, "response": copy.deepcopy(response_body)}
+        persist_state(state)
+    return json_response(response_body, 202)
+
+
+@app.get("/batches/<path:batch_id>")
+def get_batch(batch_id: str):
+    state = _STATE
+    user_id = auth_user(state)
+    if user_id is None:
+        return unauthenticated()
+    with state.lock:
+        batch = state.batches.get(batch_id)
+        if batch is None or batch.get("user_id") != user_id:
+            return not_found("no such batch")
+        return json_response(_batch_view(state, batch))
 
 
 @app.post("/dossiers")
@@ -1900,6 +2490,12 @@ def _values_response(state: State, dossier: dict, true_at: str, as_of: datetime,
         "value": execs["value"],
         "true_from": execs["true_from"],
         "citations": execs["citations"],
+    }
+    investors = assemble_investors(active_candidates["investors"])
+    fields["investors"] = {
+        "value": investors["value"],
+        "true_from": investors["true_from"],
+        "citations": investors["citations"],
     }
     return json_response(
         {

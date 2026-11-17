@@ -422,6 +422,23 @@ DOSSIER_SCRIPT = r"""
     return parts.join('');
   }
 
+  function investorsHtml(entry){
+    entry=entry||{};
+    const status=entry.status||'unknown';
+    const names=entry.value||[];
+    const parts=['<section class="field executive-field" data-status="'+esc(status)+'">'];
+    parts.push('<div class="field-head"><h2>Investors</h2><span class="badge status-'+esc(status)+'">'+esc(STATUS[status]||status)+'</span><span class="field-hint">Names supported by the evidence</span></div>');
+    if(names.length){
+      parts.push('<ul class="exec-list">');
+      names.forEach(function(n){parts.push('<li class="exec-member"><span class="exec-name">'+esc(n)+'</span></li>');});
+      parts.push('</ul>');
+    }else{
+      parts.push('<p class="field-value empty-value">No investors in the evidence yet</p>');
+    }
+    parts.push('</section>');
+    return parts.join('');
+  }
+
   function render(data){
     const stateEl=qs('[data-testid="dossier-state"]');
     if(stateEl){stateEl.textContent=data.state;stateEl.className='badge state-'+data.state;stateEl.setAttribute('data-state',data.state);}
@@ -437,6 +454,8 @@ DOSSIER_SCRIPT = r"""
     }
     const execHost=qs('#dossier-executives');
     if(execHost){execHost.innerHTML=execHtml(data.fields?data.fields.executives:null);}
+    const invHost=qs('#dossier-investors');
+    if(invHost){invHost.innerHTML=investorsHtml(data.fields?data.fields.investors:null);}
     schedulePoll(data.state);
   }
 
@@ -741,6 +760,30 @@ def executives_html(fields: dict) -> str:
     return "".join(parts)
 
 
+def investors_html(fields: dict) -> str:
+    entry = fields.get("investors") or {}
+    status = entry.get("status") or "unknown"
+    names = entry.get("value") or []
+    candidates = entry.get("candidates") or []
+    parts = [
+        '<section class="field executive-field" data-status="' + esc(status) + '">',
+        '<div class="field-head"><h2>Investors</h2>'
+        '<span class="badge status-' + esc(status) + '">' + esc(STATUS_LABELS.get(status, status)) + '</span>'
+        '<span class="field-hint">Names supported by the evidence</span></div>',
+    ]
+    if names:
+        parts.append('<ul class="exec-list">')
+        for name in names:
+            parts.append('<li class="exec-member"><span class="exec-name">' + esc(str(name)) + '</span></li>')
+        parts.append('</ul>')
+    else:
+        parts.append('<p class="field-value empty-value">No investors in the evidence yet</p>')
+    if candidates:
+        parts.append('<p class="hint" style="margin-top:10px">' + esc(str(len(candidates))) + ' named candidates.</p>')
+    parts.append('</section>')
+    return "".join(parts)
+
+
 def _fields_html(fields: dict) -> str:
     parts = []
     for field in FIELD_ORDER:
@@ -829,6 +872,7 @@ def dossier_page(
         fields_html = (
             f'<div class="fields" id="dossier-fields">{_fields_html(data.get("fields") or {})}</div>'
             f'<div id="dossier-executives">{executives_html(data.get("fields") or {})}</div>'
+            f'<div id="dossier-investors">{investors_html(data.get("fields") or {})}</div>'
         )
 
     body = f"""<div data-dossier data-domain="{esc(domain)}" data-state="{esc(state)}">
@@ -937,6 +981,34 @@ def evidence_page(data: dict, *, user: dict | None = None) -> str:
         exec_parts.append('<p class="empty-note">No named executives for this company.</p>')
     exec_parts.append('</section>')
     groups.append("".join(exec_parts))
+
+    inv_entry = (data.get("fields") or {}).get("investors") or {}
+    inv_candidates = inv_entry.get("candidates") or []
+    inv_parts = ['<section class="evidence-group executive-field">']
+    inv_parts.append(
+        '<h2>Investors '
+        f'<span class="badge status-{esc(inv_entry.get("status") or "unknown")}">'
+        f'{esc(STATUS_LABELS.get(inv_entry.get("status") or "unknown", ""))}</span></h2>'
+    )
+    if inv_candidates:
+        inv_parts.append('<ol class="candidates">')
+        for candidate in inv_candidates:
+            inv_parts.append(
+                '<li class="candidate" data-selected="' + ("true" if candidate.get("selected") else "false") + '">'
+                '<div class="cand-head">'
+                + ('<span class="badge status-known">Selected</span>' if candidate.get("selected") else "")
+                + f'<span class="chip">{esc(PROVIDER_LABELS.get(candidate.get("provider"), candidate.get("provider") or ""))}</span>'
+                + '</div>'
+                + f'<p class="cand-value">{esc(candidate.get("value") or "")}</p>'
+                + f"<blockquote>{esc(candidate.get('excerpt') or '')}</blockquote>"
+                + f'<a href="{esc(candidate.get("url") or "")}" rel="noreferrer noopener">{esc(candidate.get("url") or "")}</a>'
+                + '</li>'
+            )
+        inv_parts.append('</ol>')
+    else:
+        inv_parts.append('<p class="empty-note">No named investors for this company.</p>')
+    inv_parts.append('</section>')
+    groups.append("".join(inv_parts))
 
     body = f"""<p class="eyebrow">Evidence</p>
 <h1>Evidence for {esc(domain)}</h1>

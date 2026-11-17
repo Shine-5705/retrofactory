@@ -1,4 +1,4 @@
-# Dossier — Stage 2
+# Dossier — Stage 4
 
 Self-contained HTTP service and browser product. It listens on `0.0.0.0:$PORT`
 (default `8080`).
@@ -6,13 +6,13 @@ Self-contained HTTP service and browser product. It listens on `0.0.0.0:$PORT`
 ## Build
 
 ```sh
-docker build -t dossier-stage-2 .
+docker build -t dossier-stage-4 .
 ```
 
 ## Run
 
 ```sh
-docker run --rm -e PORT=8080 -p 8080:8080 dossier-stage-2
+docker run --rm -e PORT=8080 -p 8080:8080 dossier-stage-4
 ```
 
 The deployment's environment supplies `NIMBLE_API_KEY` and `NIMBLE_BASE_URL`
@@ -22,7 +22,7 @@ with `-e` or an env file; never bake credentials into the image.
 
 ```sh
 docker run --rm -e PORT=8080 -p 8080:8080 \
-  -e NIMBLE_API_KEY -e NIMBLE_BASE_URL dossier-stage-2
+  -e NIMBLE_API_KEY -e NIMBLE_BASE_URL dossier-stage-4
 ```
 
 Verify:
@@ -54,5 +54,5 @@ The supplied harness is run from the kickoff checkout, not from this folder:
 
 ```sh
 cd /workspace/band/ref/sf-buildathon-2026 && . .venv/bin/activate && \
-python -m harness run --track dossier --repo <result-repo> --stage 2 --out <fresh-out-dir>
+python -m harness run --track dossier --repo <result-repo> --stage 4 --out <fresh-out-dir>
 ```

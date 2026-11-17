@@ -2,8 +2,10 @@
 
 A candidate is one value for one field, supported by one excerpt of one page.
 Each field keeps every value its evidence supports; the fixed stage-2 rule here
-picks one of them, deterministically.  Executives run the same rule separately
-per title.
+picks one of them, deterministically.  Executives and investors run rules of
+their own (per title / per member).
+
+Stage 4 adds page origins and the three corroboration keys on every field.
 """
 
 from __future__ import annotations
@@ -18,11 +20,12 @@ from dossier_support import (
     collapse_ws,
     excerpt_value,
     executive_value,
+    investor_names,
     split_sentences,
 )
 from pages import parse_page_details
 
-ALL_FIELDS = FIELDS + ("executives",)
+ALL_FIELDS = FIELDS + ("executives", "investors")
 AUTHORITY = {"own": 2, "filing": 2, "news": 1, "aggregator": 0}
 PROVIDER_ORDER = {"nimble": 0, "tavily": 1, "kernel": 2, "browserbase": 3}
 
@@ -99,6 +102,19 @@ def citation(candidate: dict) -> dict:
     }
 
 
+def _blank_corroboration() -> dict:
+    return {"origins": [], "corroborated": False, "corroborated_since": None}
+
+
+def _origins_for(candidates: list[dict]) -> list[str]:
+    origins = set()
+    for candidate in candidates:
+        origin = candidate.get("origin")
+        if isinstance(origin, str) and origin:
+            origins.add(origin)
+    return sorted(origins)
+
+
 def assemble_field(candidates: list[dict]) -> dict:
     if not candidates:
         return {
@@ -107,6 +123,7 @@ def assemble_field(candidates: list[dict]) -> dict:
             "citations": [],
             "candidates": [],
             "true_from": None,
+            **_blank_corroboration(),
         }
     ordered = order_candidates(candidates)
     for index, candidate in enumerate(ordered):
@@ -120,19 +137,21 @@ def assemble_field(candidates: list[dict]) -> dict:
         for candidate in ordered
         if same_json_value(candidate["value"], value)
     ]
+    origins = _origins_for([c for c in ordered if same_json_value(c["value"], value)])
     return {
         "value": value,
         "status": status,
         "citations": citations,
         "candidates": ordered,
         "true_from": selected.get("true_from"),
+        "origins": origins,
+        "corroborated": len(origins) >= 2,
+        "corroborated_since": None,
     }
 
 
-def _member_name(value: object) -> tuple | None:
-    if not isinstance(value, str):
-        return None
-    return _json_key(value)
+def _member_key(member: dict) -> tuple:
+    return (_json_key(member.get("name")),)
 
 
 def assemble_executives(candidates: list[dict]) -> dict:
@@ -161,6 +180,7 @@ def assemble_executives(candidates: list[dict]) -> dict:
             "citations": [],
             "candidates": [],
             "true_from": None,
+            **_blank_corroboration(),
         }
 
     contested = False
@@ -188,13 +208,124 @@ def assemble_executives(candidates: list[dict]) -> dict:
     else:
         true_from = max(member_dates)
 
+    member_candidates = [
+        c for c in ordered_all
+        if c.get("title") in selected_by_title
+        and same_json_value(c.get("value"), selected_by_title[c["title"]]["value"])
+    ]
+    member_origins = {
+        title: _origins_for(
+            [c for c in by_title[title] if same_json_value(c.get("value"), selected_by_title[title]["value"])]
+        )
+        for title in selected_by_title
+    }
     return {
         "value": members,
         "status": "contested" if contested else "known",
         "citations": citations,
         "candidates": ordered_all,
         "true_from": true_from,
+        "origins": _origins_for(member_candidates),
+        "corroborated": all(len(origins) >= 2 for origins in member_origins.values()),
+        "corroborated_since": None,
     }
+
+
+def _investor_members(candidates: list[dict]) -> list[dict]:
+    """Members by name, with the candidates that support each one."""
+    by_name: dict[str, list[dict]] = {}
+    for candidate in candidates:
+        name = candidate.get("value")
+        if isinstance(name, str):
+            by_name.setdefault(name.strip(), []).append(candidate)
+    members = []
+    for name in sorted(by_name):
+        group = by_name[name]
+        authoritative = any(c.get("kind") in ("own", "filing") for c in group)
+        origins = {c.get("origin") for c in group if isinstance(c.get("origin"), str) and c.get("origin")}
+        if not authoritative and len(origins) < 2:
+            continue
+        members.append({"name": name, "candidates": group})
+    return members
+
+
+def assemble_investors(candidates: list[dict]) -> dict:
+    ordered = order_candidates(candidates)
+    members = _investor_members(ordered)
+    if not members:
+        for index, candidate in enumerate(ordered):
+            candidate["selected"] = False
+        return {
+            "value": None,
+            "status": "unknown",
+            "citations": [],
+            "candidates": ordered,
+            "true_from": None,
+            **_blank_corroboration(),
+        }
+
+    member_names = {m["name"] for m in members}
+    for candidate in ordered:
+        name = candidate.get("value")
+        candidate["selected"] = isinstance(name, str) and name.strip() in member_names
+
+    value = [m["name"] for m in members]
+    citations: list[dict] = []
+    member_true_from: dict[str, str | None] = {}
+    for member in members:
+        group = order_candidates(member["candidates"])
+        citations.extend(citation(c) for c in group)
+        dates = [c.get("true_from") for c in group if isinstance(c.get("true_from"), str) and c["true_from"]]
+        member_true_from[member["name"]] = min(dates) if dates else None
+
+    true_from = None
+    if member_true_from and all(date is not None for date in member_true_from.values()):
+        true_from = max(member_true_from.values())
+
+    all_origins = _origins_for([c for c in ordered if c.get("selected")])
+    member_origins = {
+        m["name"]: _origins_for(m["candidates"]) for m in members
+    }
+    return {
+        "value": value,
+        "status": "known",
+        "citations": citations,
+        "candidates": ordered,
+        "true_from": true_from,
+        "origins": all_origins,
+        "corroborated": all(len(o) >= 2 for o in member_origins.values()),
+        "corroborated_since": None,
+    }
+
+
+def _candidate_origin(details: dict, domain: str) -> str:
+    """Resolve a page's origin from rule 1..4 (no canonical chain fetch here).
+
+    The build resolves canonical chains through the provider and puts the final
+    origin in ``details['origin_resolved']``; when absent, fall back to the
+    host of the canonical URL (rule 16) or the registrant (rule 4).
+    """
+    resolved = details.get("origin_resolved")
+    if isinstance(resolved, str) and resolved:
+        return resolved
+    first = details.get("first_published_by")
+    if first:
+        return first
+    canonical = details.get("canonical")
+    if canonical:
+        from pages import url_host
+
+        host = url_host(canonical)
+        if host:
+            return host
+    if details.get("lookalike"):
+        return domain
+    registrant = details.get("registrant")
+    if registrant:
+        return registrant
+    from pages import url_host
+
+    return url_host(details.get("url") or "") or domain
 
 
 def collect_candidates(
@@ -211,9 +342,12 @@ def collect_candidates(
             continue
         provider = page.get("provider") or "nimble"
         details = parse_page_details(text, url, domain)
+        if page.get("origin_resolved"):
+            details["origin_resolved"] = page["origin_resolved"]
         kind = details["kind"]
         published_at = details["published_at"]
         true_from = details["true_from"]
+        origin = _candidate_origin(details, domain)
         for line in details["prose"].splitlines():
             for sentence in split_sentences(line):
                 excerpt = collapse_ws(sentence)
@@ -237,6 +371,7 @@ def collect_candidates(
                             "published_at": published_at,
                             "true_from": true_from,
                             "retrieved_at": retrieved_at,
+                            "origin": origin,
                             "selected": False,
                         }
                     )
@@ -259,6 +394,26 @@ def collect_candidates(
                             "published_at": published_at,
                             "true_from": true_from,
                             "retrieved_at": retrieved_at,
+                            "origin": origin,
+                            "selected": False,
+                        }
+                    )
+                for name in investor_names(excerpt, company, domain):
+                    key = (url, _json_key(name))
+                    if key in seen["investors"]:
+                        continue
+                    seen["investors"].add(key)
+                    collected["investors"].append(
+                        {
+                            "value": name,
+                            "url": url,
+                            "excerpt": excerpt,
+                            "provider": provider,
+                            "kind": kind,
+                            "published_at": published_at,
+                            "true_from": true_from,
+                            "retrieved_at": retrieved_at,
+                            "origin": origin,
                             "selected": False,
                         }
                     )
@@ -275,6 +430,7 @@ def imported_field(value: object, citations: list[dict], researched_at: str | No
             "citations": [],
             "candidates": [],
             "true_from": None,
+            **_blank_corroboration(),
         }
     candidates: list[dict] = []
     seen_urls: set[str] = set()
@@ -289,6 +445,8 @@ def imported_field(value: object, citations: list[dict], researched_at: str | No
         if url in seen_urls:
             continue
         seen_urls.add(url)
+        from pages import url_host
+
         candidates.append(
             {
                 "value": value,
@@ -300,6 +458,7 @@ def imported_field(value: object, citations: list[dict], researched_at: str | No
                 "true_from": None,
                 "retrieved_at": researched_at,
                 "learned_at": researched_at,
+                "origin": item.get("origin") or url_host(url) or "",
                 "selected": False,
             }
         )
@@ -310,6 +469,7 @@ def imported_field(value: object, citations: list[dict], researched_at: str | No
             "citations": [],
             "candidates": [],
             "true_from": None,
+            **_blank_corroboration(),
         }
     return assemble_field(candidates)
 
@@ -326,6 +486,11 @@ def rebuild_field_from_candidates(
             learned = candidate.get("retrieved_at")
         if not isinstance(learned, str):
             learned = researched_at
+        from pages import url_host
+
+        origin = candidate.get("origin")
+        if not isinstance(origin, str) or not origin:
+            origin = url_host(candidate.get("url") or "") or ""
         clean.append(
             {
                 "value": candidate.get("value"),
@@ -337,6 +502,7 @@ def rebuild_field_from_candidates(
                 "true_from": candidate.get("true_from"),
                 "retrieved_at": candidate.get("retrieved_at"),
                 "learned_at": learned,
+                "origin": origin,
                 "selected": bool(candidate.get("selected")),
             }
         )

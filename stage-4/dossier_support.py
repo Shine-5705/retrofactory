@@ -14,6 +14,17 @@ FIELDS = (
     "funding_total",
 )
 
+INVESTOR_SUFFIXES = (
+    "Ventures",
+    "Capital",
+    "Partners",
+    "Fund",
+    "Investments",
+    "Holdings",
+    "Equity",
+)
+INVESTOR_PHRASES = ("investor", "investors", "led by", "backed by", "participated")
+
 STATEMENT_PHRASES = {
     "legal_name": [
         "legal name",
@@ -524,3 +535,101 @@ def executive_value(
     if len(normalised) != 1:
         return None
     return next(iter(normalised))
+
+
+# --------------------------------------------------------------------------
+# Investors (stage 4): Appendix A with investor statement phrases.
+
+
+def _mask_spans(text: str, spans: list[tuple[int, int]]) -> str:
+    chars = list(text)
+    for start, end in spans:
+        for i in range(start, end):
+            chars[i] = "\x00"
+    return "".join(chars)
+
+
+def _capital_runs(masked: str) -> list[tuple[int, int]]:
+    """Maximal runs of capitalised words joined by single spaces."""
+    tokens: list[tuple[int, int]] = []
+    i = 0
+    while i < len(masked):
+        end = _is_capitalised_at(masked, i)
+        if end is not None:
+            tokens.append((i, end))
+            i = end
+        else:
+            i += 1
+    groups: list[tuple[int, int]] = []
+    current: list[tuple[int, int]] = []
+    for token in tokens:
+        if current and token[0] == current[-1][1] + 1 and masked[current[-1][1]] == " ":
+            current.append(token)
+        else:
+            if current:
+                groups.append((current[0][0], current[-1][1]))
+            current = [token]
+    if current:
+        groups.append((current[0][0], current[-1][1]))
+    return groups
+
+
+def investor_names(
+    excerpt: str, company: str, domain: str
+) -> list[str]:
+    """The investor names supported by an excerpt (Appendix A, stage 4)."""
+    text = collapse_ws(excerpt)
+    if not text:
+        return []
+    if not is_single_sentence(text):
+        return []
+    if not (find_phrase_spans(text, domain) or find_phrase_spans(text, company)):
+        return []
+    if not has_any_phrase(text, INVESTOR_PHRASES):
+        return []
+    if has_any_phrase(text, NEGATING_PHRASES):
+        return []
+
+    spans = list(find_phrase_spans(text, company))
+    spans.extend(find_phrase_spans(text, domain))
+    for phrase in INVESTOR_PHRASES:
+        spans.extend(find_phrase_spans(text, phrase))
+    masked = _mask_spans(text, spans)
+    runs = _capital_runs(masked)
+
+    names: list[str] = []
+    for start, end in runs:
+        words = [w for w in masked[start:end].split(" ") if w]
+        if len(words) >= 2 and words[-1] in INVESTOR_SUFFIXES:
+            names.append(text[start:end])
+
+    if amount_spans(text):
+        for phrase in ("led by", "backed by"):
+            for phrase_start, phrase_end in find_phrase_spans(text, phrase):
+                pos = phrase_end
+                if text[pos : pos + 1] != " ":
+                    continue
+                pos += 1
+                end = _is_capitalised_at(text, pos)
+                if end is None:
+                    continue
+                j = end
+                while j < len(text):
+                    if text[j] == " ":
+                        nxt = _is_capitalised_at(text, j + 1)
+                        if nxt is not None:
+                            j = nxt
+                            continue
+                    break
+                names.append(text[pos:j])
+
+    unique: list[str] = []
+    for name in names:
+        if name not in unique:
+            unique.append(name)
+    return unique
+
+
+def investor_value(excerpt: str, company: str, domain: str) -> list[str] | None:
+    names = investor_names(excerpt, company, domain)
+    return names or None
