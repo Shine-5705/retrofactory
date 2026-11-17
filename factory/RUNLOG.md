@@ -124,7 +124,11 @@ Times are UTC. Where a figure was not stated in a room message, it is marked
   (uncommitted fix of that line); handoff claimed clean.
 - Review rounds: 2 (both REJECT). Ledger: added f000d83 REJECT entry; root cause
   (sibling field using wrong evidence basis) is a first occurrence, not promoted.
-  Standing rules still the single collapsed-evidence rule.
+  Standing rules still the single collapsed-evidence rule. Coordinator clarified
+  S4-28 was a regression from the b51897c fix, corrected in clean revision
+  cd6208cc44ac7e2ee34cf9c4c25c698f574cc02d (parent f000d83; only change is
+  stage-4/server.py member `corroborated` back to current-candidate origins),
+  now under re-review.
 - Open risk (reviewer): no live Nimble credentials; provider 429/5xx/all-fail
   exercised with reviewer mock only.
 - Spend: STAGE 4 not reported (no seat reported figures).

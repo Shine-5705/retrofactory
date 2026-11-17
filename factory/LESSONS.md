@@ -361,6 +361,11 @@ causes shared across a fix and another symptom are listed once.
     server.py:937 `standing.values()` -> `current.values()` that fixes S4-28). A
     handoff must name a committed revision with a clean tree; commit the correction
     before re-review.
+  - Resolution: the S4-28 defect was a regression introduced while fixing the
+    S4-21/22/29/30 corroborated_since findings of b51897c (the standing-origin set
+    was reused for member `corroborated`). Corrected in clean revision cd6208c,
+    which reverts member `corroborated` to current-candidate origins while keeping
+    the per-member `member_since` and all-gather-times fix for `corroborated_since`.
 
 ## Standing rules
 
