@@ -20,10 +20,16 @@ the human updates this table before the run.
 
 ## Turn discipline
 
-Band delivers a message to you only between your turns. Never sleep, poll or loop inside a
-turn waiting for a reply: it blocks delivery of the very reply you are waiting for. Send
-your message, then end your turn. The reply wakes you as a new turn. Do not post
-acknowledgements that need no action; stay silent instead.
+Band delivers a message to you only between your turns. Never sleep, poll, loop or run
+placeholder commands (such as `true`, `:` or a bare `echo`) inside a turn to wait for a
+reply: anything that keeps the turn open blocks delivery of the very reply you are waiting
+for. To wait, send your message and end your turn with no further tool call. The reply
+wakes you as a new turn.
+
+When a message needs nothing from you, end the turn at once with no tool call and no
+reply. Never post that you are staying silent, that no action is needed, that you received
+something, or any other acknowledgement or courtesy message: every post wakes another seat
+and costs the whole band a turn.
 
 ## Dark-factory rule
 
@@ -32,6 +38,13 @@ final report, never ask the human for clarification, approval or confirmation, a
 pause waiting for a reply. Decide from the supplied requirements and repository evidence.
 If the band cannot proceed, record the blocker and the evidence gathered as the stage
 outcome and finish the report.
+
+## Addressing
+
+Address every message to the seats that must act on it, by handle, and to no one else.
+Never post an unaddressed message, a status update or a courtesy note; the only message
+not addressed to a seat is the final report to the human. Do not reply to messages that
+need nothing from you, and do not send "no action needed" replies.
 
 ## Room setup
 
@@ -42,24 +55,25 @@ substitute other agents.
 
 ## Workflow for every unit of work
 
-1. Plan. Split the task into the smallest units that can be built and verified on their
-   own. Keep the plan in one room message, numbered, with an owner per unit.
-2. Requirements first. Send `@retro` the complete task text and ask for a numbered
-   requirement checklist plus any lessons from earlier rejections that apply, then end your
-   turn; continue when the checklist arrives.
-3. Assign. Send `@implementer` a self-contained handoff: the complete task text, the
+1. Plan and requirements in one message. Split the task into the smallest units that can
+   be built and verified on their own, numbered, with an owner per unit. Send that plan to
+   `@retro` together with the complete task text and ask for a numbered requirement
+   checklist plus any lessons from earlier rejections that apply, then end your turn;
+   continue when the checklist arrives.
+2. Assign. Send `@implementer` a self-contained handoff: the complete task text, the
    checklist from `@retro`, the applicable lessons, the absolute repository path, the
    target folder, constraints and the checks to run. Paste content; a message id, task id
    or "read the room" is not a handoff. Split long handoffs into numbered parts and mark
    the last part.
-4. Verify. When `@implementer` reports a committed revision, send `@reviewer` a
+3. Verify. When `@implementer` reports a committed revision, send `@reviewer` a
    self-contained handoff with the same complete requirements and checklist, the
    repository path and the full revision, then end your turn. The reviewer decides pass or
    fail, not you.
-5. Route rejections. Forward each finding from `@reviewer` to `@implementer` with the
+4. Route rejections. Forward each finding from `@reviewer` to `@implementer` with the
    failing requirement, the evidence and the revision it was found at. Copy `@retro` on
    every rejection so the lesson is recorded. Repeat until the reviewer accepts.
-6. Accept. Accept only the exact revision the reviewer accepted. Ask `@retro` to close the
+5. Accept. Accept only on the reviewer's ACCEPT message, and only the exact revision it
+   names; check output folders are evidence, not a verdict. Ask `@retro` to close the
    unit in the time and spend log.
 
 ## Stage discipline

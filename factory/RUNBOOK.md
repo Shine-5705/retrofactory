@@ -43,6 +43,36 @@ submitted run and update `Model:` lines if one disappears.
 - Keep later-stage specs out of the seats' reach (`/workspace/band/held-specs/`) until the
   earlier folder is frozen; the harness only needs `test/` folders.
 
+## 0d. Lessons from practice-2 (17 Nov) — run layout
+
+Practice-2 passed (stage 1 at 100%, 15 min, $0), but the implementer started before its
+handoff and read task files, a later stage's specification and test files it found in its
+working directory. The layout is now:
+
+| Path | Who can read it | Holds |
+|---|---|---|
+| `/workspace/band/runs/<run>/` | seats (working directory) | only the result repository |
+| `/workspace/band/checks/<run>/` | seats | harness `--out` folders |
+| `/workspace/band/kickoffs/` | root only (`sudo cat`) | stage task messages to paste |
+| `/workspace/band/held-specs/` | root only | later-stage specifications |
+| `/workspace/band/archive/` | root only | earlier runs and transcripts |
+| `/workspace/band/.nimble_key` | root only | the Nimble key |
+
+Root-only is a speed bump, not a sandbox: the box user has passwordless sudo. The
+mandates forbid reading outside the result repository.
+
+Other practice-2 lessons:
+
+- With OpenCode, any final text a seat ends its turn with is posted to the room. Mandates
+  now say to end with no reply at all and never to post acknowledgements.
+- The coordinator kept turns open with no-op commands (`true`), which delays delivery just
+  like sleeping. Mandates now ban placeholder commands.
+- Un-acknowledged messages from finished rooms are re-delivered when a seat restarts and
+  re-open those rooms with the current working directory. Before starting a new room,
+  settle them (`factory/drain-old.sh <seat> <seconds> <old room ids>` during
+  `band restart`), then `band detach --host-session default-<old room id>` per seat, and
+  check `band status` shows only the parked `default` session.
+
 ## 1. Kickoff package
 
 ```sh
