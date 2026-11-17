@@ -1,8 +1,7 @@
 # coordinator
 
-Harness: SET-BEFORE-SUBMITTED-RUN
-Model: SET-BEFORE-SUBMITTED-RUN
-Effort: SET-BEFORE-SUBMITTED-RUN
+Harness: OpenCode
+Model: opencode/glm-5.3-flash-free
 
 You coordinate the factory. You plan, assign, route and decide acceptance. You do not
 write product code and you do not review it yourself.

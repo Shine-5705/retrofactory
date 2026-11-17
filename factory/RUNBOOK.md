@@ -14,6 +14,22 @@ Deadline: **20 Nov 2026, 5:00 PM PST = 21 Nov 2026, 06:30 IST** (HackerSquad: No
 - [ ] A Nimble API key (free trial: 5,000 pages, no card, per nimbleway.com/pricing) for the
       one live `runway.com` run only. Never paste it into the room or the repo.
 
+
+## 0b. Shine's box (Debian 13) — prepared 17 Nov
+
+Installed and verified from the shell:
+- Docker 29.10.0 (static) + buildx, `hello-world` OK, harness `--mode isolated` toy probe
+  gives the documented 2/8 result. After a reboot run `/workspace/band/bin/start-docker.sh`.
+- Band Desktop 0.4.18 (`band-desktop`, `band` CLI, `jamd`). Daemon: `band daemon run`.
+- OpenCode 1.19.5 with OpenCode Zen free models (no account, $0.00 in `opencode stats`).
+  `band agent create --transport opencode --dry-run` passes.
+- Kickoff harness venv at `/workspace/band/ref/sf-buildathon-2026/.venv`.
+
+Remaining sign-ins: `band init --device` (Band account), Nimble free-trial key for the live run.
+Then: `factory/create_seats.sh /abs/path/result-repo`.
+Free models rotate daily: re-check `curl -s https://opencode.ai/zen/v1/models` before the
+submitted run and update `Model:` lines if one disappears.
+
 ## 1. Kickoff package
 
 ```sh
