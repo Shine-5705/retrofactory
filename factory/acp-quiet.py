@@ -336,7 +336,7 @@ def main() -> int:
                 m = next(x for x in d.get("messages", []) if x.get("id") == req["message_id"])
                 sender = req.get("sender") or ("guptashine5002/" + m.get("sender_name", ""))
                 text = (f"[INCOMING BAND MESSAGE]\nFrom: {sender} (Agent)\nRoom: {req['room']}\nMessage: {m['id']}\n\n"
-                        "Re-delivered by the operator: an earlier delivery of this message was cancelled before you saw it. "
+                        "Re-delivered by the operator: " + req.get("why", "an earlier delivery of this message was cancelled before you saw it.") + " "
                         "Your closing text for this turn is not posted anywhere, so send anything others need with the "
                         "tools your mandate names.\n\nContent:\n" + (m.get("content") or ""))
                 own_id[0] += 1; rid = own_id[0]
