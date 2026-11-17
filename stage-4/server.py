@@ -236,7 +236,8 @@ def _serialise_dossier(dossier: dict, building_as_before: bool = True) -> dict:
         "fields": copy.deepcopy(dossier["fields"]),
         "builds": copy.deepcopy(dossier.get("builds", [])),
         "history": copy.deepcopy(dossier.get("history", {})),
-        "gathered": dict(dossier.get("gathered", {})),
+        "gathered": copy.deepcopy(dossier.get("gathered", {})),
+        "member_since": dict(dossier.get("member_since", {})),
         "has_ready": bool(dossier.get("has_ready")),
         "building": building,
     }
@@ -736,6 +737,19 @@ def candidate_identity(field: str, candidate: dict) -> str:
     return json.dumps(parts, ensure_ascii=False)
 
 
+def _gather_times(record: object) -> list[str]:
+    """All ready-build times a candidate was gathered, from a stored record."""
+    if isinstance(record, dict):
+        times = record.get("times")
+        if isinstance(times, list):
+            return [t for t in times if isinstance(t, str)]
+        at = record.get("at")
+        return [at] if isinstance(at, str) else []
+    if isinstance(record, str):
+        return [record]
+    return []
+
+
 def _assign_learned(dossier: dict, raw: dict[str, list[dict]], build_time: str) -> None:
     gathered = dossier.setdefault("gathered", {})
     for field in ALL_FIELDS:
@@ -743,17 +757,40 @@ def _assign_learned(dossier: dict, raw: dict[str, list[dict]], build_time: str) 
             key = candidate_identity(field, candidate)
             record = gathered.get(key)
             if isinstance(record, dict):
+                times = _gather_times(record)
+                if build_time not in times:
+                    times.append(build_time)
+                record["times"] = times
+                record["at"] = record.get("at") or (times[0] if times else build_time)
+                if not record.get("origin"):
+                    record["origin"] = candidate.get("origin")
+                if record.get("value") is None:
+                    record["value"] = candidate.get("value")
+                if record.get("field") is None:
+                    record["field"] = field
                 candidate["learned_at"] = record.get("at") or build_time
             elif isinstance(record, str):
+                gathered[key] = {
+                    "at": record,
+                    "times": [record, build_time] if build_time != record else [record],
+                    "origin": candidate.get("origin"),
+                    "value": candidate.get("value"),
+                    "field": field,
+                }
                 candidate["learned_at"] = record
             else:
                 gathered[key] = {
                     "at": build_time,
+                    "times": [build_time],
                     "origin": candidate.get("origin"),
                     "value": candidate.get("value"),
                     "field": field,
                 }
                 candidate["learned_at"] = build_time
+
+
+def _member_key_str(field: str, member: tuple) -> str:
+    return json.dumps([field, member[0] or "", member[1]], ensure_ascii=False)
 
 
 def _member_names_of(entry: dict) -> list[tuple[str, object]]:
@@ -809,17 +846,30 @@ def _standing_origins(
         origin = record.get("origin")
         if not isinstance(origin, str) or not origin:
             continue
-        at = parse_rfc3339(record.get("at"))
-        if since_dt is not None and (at is None or at < since_dt):
-            continue
-        if until_dt is not None and (at is None or at > until_dt):
-            continue
         if member is not None:
             if not isinstance(key, str):
                 continue
             if member[0] and member[0] not in key:
                 continue
-        origins.add(origin)
+        times = _gather_times(record)
+        if not times:
+            at = parse_rfc3339(record.get("at"))
+            if at is None:
+                continue
+            times = [record.get("at")]
+        gathered_in_window = False
+        for stamp in times:
+            at = parse_rfc3339(stamp)
+            if at is None:
+                continue
+            if since_dt is not None and at < since_dt:
+                continue
+            if until_dt is not None and at > until_dt:
+                continue
+            gathered_in_window = True
+            break
+        if gathered_in_window:
+            origins.add(origin)
     return origins
 
 
@@ -875,12 +925,21 @@ def _decorate_corroboration(
         if field in ("executives", "investors"):
             current = _member_current_origins(entry, field)
             entry["origins"] = sorted(set().union(*current.values())) if current else []
-            entry["corroborated"] = bool(current) and all(len(o) >= 2 for o in current.values())
+            member_since = dossier.get("member_since") or {}
+            member_start = {
+                m: member_since.get(_member_key_str(field, m), learned_at)
+                for m in current
+            }
+            standing = {
+                m: _standing_origins(gathered, field, m[1], member_start[m], m)
+                for m in current
+            }
+            entry["corroborated"] = bool(current) and all(len(o) >= 2 for o in standing.values())
             since = None
             for stamp in build_times:
                 iso = now_iso(stamp)
                 if all(
-                    len(_standing_origins(gathered, field, m[1], learned_at, m, iso)) >= 2
+                    len(_standing_origins(gathered, field, m[1], member_start[m], m, iso)) >= 2
                     for m in current
                 ):
                     since = iso
@@ -1124,6 +1183,14 @@ def _finish_ready(
         entry["seq"] = state.next_seq
         state.next_seq += 1
         state.feed.append(entry)
+
+    member_since = dossier.setdefault("member_since", {})
+    for field in ("executives", "investors"):
+        previous_members = set(_member_names_of(previous_fields.get(field) or {}))
+        for member in _member_names_of(new_fields[field]):
+            key = _member_key_str(field, member)
+            if key not in member_since or member not in previous_members:
+                member_since[key] = build_time
 
     _decorate_corroboration(dossier, new_fields, build_time)
 
@@ -1372,6 +1439,7 @@ def _new_dossier(dossier_id: str, domain: str) -> dict:
         "builds": [],
         "history": {field: [] for field in ALL_FIELDS},
         "gathered": {},
+        "member_since": {},
         "has_ready": False,
     }
 
@@ -1503,7 +1571,11 @@ def _legacy_origin(candidate: dict) -> str:
 
 
 def _import_gathered(builds: list[dict], old_gathered: dict, researched_at: str | None) -> dict:
-    """Rebuild gathered records from imported builds (S4-23/S4-24)."""
+    """Rebuild gathered records from imported builds (S4-23/S4-24).
+
+    A candidate identity keeps every ready-build time that gathered it, so a
+    re-gathered candidate counts as standing from the later build too (S4-22).
+    """
     gathered: dict = {}
     for build in builds:
         when = build.get("time")
@@ -1514,20 +1586,46 @@ def _import_gathered(builds: list[dict], old_gathered: dict, researched_at: str 
                 if not isinstance(candidate, dict):
                     continue
                 key = candidate_identity(field, candidate)
-                at = when
-                gathered[key] = {
-                    "at": at,
-                    "origin": candidate.get("origin") or _legacy_origin(candidate),
-                    "value": candidate.get("value"),
-                    "field": field,
-                }
+                record = gathered.get(key)
+                if record is None:
+                    record = {
+                        "at": when,
+                        "times": [],
+                        "origin": candidate.get("origin") or _legacy_origin(candidate),
+                        "value": candidate.get("value"),
+                        "field": field,
+                    }
+                    gathered[key] = record
+                times = record.setdefault("times", [])
+                if when not in times:
+                    times.append(when)
     for key, record in old_gathered.items():
         if key not in gathered:
             if isinstance(record, dict):
+                if "times" not in record:
+                    record["times"] = _gather_times(record)
                 gathered[key] = record
             else:
-                gathered[key] = {"at": record, "origin": "", "value": None, "field": ""}
+                gathered[key] = {
+                    "at": record,
+                    "times": [record] if isinstance(record, str) else [],
+                    "origin": "",
+                    "value": None,
+                    "field": "",
+                }
     return gathered
+
+
+def _import_member_since(fields: dict, at: str | None) -> dict:
+    """Initialise per-member 'became a member' times for imported state."""
+    result: dict = {}
+    if not isinstance(at, str):
+        return result
+    for field in ("executives", "investors"):
+        entry = fields.get(field) or {}
+        for member in _member_names_of(entry):
+            result[_member_key_str(field, member)] = at
+    return result
 
 
 def _decorate_imported_fields(dossier: dict) -> None:
@@ -1628,6 +1726,8 @@ def _restore_stage3_dossier(item: dict, state: State) -> dict | None:
         "builds": clean_builds,
         "history": clean_history,
         "gathered": _import_gathered(clean_builds, gathered, researched_at),
+        "member_since": item.get("member_since") if isinstance(item.get("member_since"), dict)
+        else _import_member_since(clean_fields, researched_at),
         "has_ready": bool(item.get("has_ready")),
     }
     _decorate_imported_fields(dossier)
@@ -1706,12 +1806,16 @@ def _import_legacy_dossier(item: dict, state: State) -> dict | None:
     for field in ALL_FIELDS:
         for candidate in assembled[field].get("candidates") or []:
             key = candidate_identity(field, candidate)
+            when = candidate.get("learned_at") or candidate.get("retrieved_at") or researched_at
             dossier["gathered"][key] = {
-                "at": candidate.get("learned_at") or candidate.get("retrieved_at") or researched_at,
+                "at": when,
+                "times": [when] if isinstance(when, str) else [],
                 "origin": candidate.get("origin") or _legacy_origin(candidate),
                 "value": candidate.get("value"),
                 "field": field,
             }
+    dossier["member_since"] = item.get("member_since") if isinstance(item.get("member_since"), dict) \
+        else _import_member_since(assembled, researched_at)
 
     for field in FIELDS:
         entry = assembled[field]

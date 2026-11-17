@@ -1071,7 +1071,8 @@ def contested_page(items: list[dict], *, user: dict | None = None) -> str:
 def history_page(domain: str, history: dict, *, user: dict | None = None) -> str:
     labels = dict(FIELD_LABELS)
     labels["executives"] = "Executive team"
-    order = list(FIELD_ORDER) + ["executives"]
+    labels["investors"] = "Investors"
+    order = list(FIELD_ORDER) + ["executives", "investors"]
     sections = []
     for field in order:
         entries = history.get(field) or []
@@ -1084,8 +1085,10 @@ def history_page(domain: str, history: dict, *, user: dict | None = None) -> str
                     for m in value
                     if isinstance(m, dict)
                 )
+            elif field == "investors" and isinstance(value, list):
+                shown = ", ".join(str(n) for n in value)
             else:
-                shown = value_text(field, value) if field != "executives" else ("" if value is None else str(value))
+                shown = value_text(field, value) if field not in ("executives", "investors") else ("" if value is None else str(value))
             if value is None:
                 shown = "Not found"
             rows.append(
