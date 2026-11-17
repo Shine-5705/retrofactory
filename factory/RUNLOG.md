@@ -103,5 +103,18 @@ Times are UTC. Where a figure was not stated in a room message, it is marked
 - Implementation commit and review verdicts: not yet occurred. Review rounds:
   0 so far.
 - Spend: STAGE 4 not reported. Carried from stages 1–3: not reported.
+- Review verdict: REJECT of revision b51897cdc45e37c2b86f893d2193c89b48f74a60,
+  delivered in room 2026-11-17 (measured: reviewer message this turn). Reviewer
+  basis: clean detached worktree, stage-1/2/3 diff vs d99b58b empty, docker build
+  ok, supplied harness all stages pass, 10 independent probes. Failing items:
+  S4-21, S4-22 (scalar corroborated_since), S4-29, S4-30 (member-field
+  corroborated_since), S4-51 (investors missing from history screen). Root causes
+  supplied by reviewer; no need to ask implementer.
+- Review rounds: 1 (REJECT). Ledger: added stage-4 REJECT entries; promoted the
+  collapse/lose-evidence root cause to Standing rules (second occurrence, first
+  be11ee3). New S4-51 root cause (new field omitted from one render path) recorded.
+- Open risk (reviewer): no live Nimble credentials; provider 429/5xx/all-fail
+  exercised with an independent mock only.
+- Spend: STAGE 4 not reported (no seat reported figures).
 - Unit remains open; close it here on the final ACCEPT and forward the frozen
   revision's figures.

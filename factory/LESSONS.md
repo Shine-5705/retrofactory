@@ -302,6 +302,50 @@ causes shared across a fix and another symptom are listed once.
     distinct supporting evidence items have been retained; a "one per X" rule
     means one per X, not one per deduplicated value.
 
+- 2026-11-17 (Stage 4, revision b51897c): "first-seen" tracking of gathered
+  origins drops later re-gatherings, so corroboration history is lost.
+  - Symptom: `corroborated_since` stayed null and `corroborated` false even when a
+    selected value/member had two or more standing origins. Scalar case (S4-21/22):
+    t1 CEO Dana Ruiz from a.test; t2 Lee Park from b.test; t3 Dana Ruiz again from
+    a.test plus c.test — expected origin a.test to count as standing from t3, giving
+    corroborated_since 2026-03-03T09:00:00+00:00, but it was filtered out as
+    "pre-learned_at". Member case (S4-29/30): cfo Ana Silva from alpha.test (t1) and
+    delta.test (t2), cto Cy Park from gamma.test+epsilon.test (t3) — expected both
+    members corroborated at t3, but Ana's delta.test was missed and a single
+    field-level learned_at was used for every member.
+  - Root cause: `_assign_learned` (server.py:739) records only the first time for a
+    candidate identity and never updates it when a later ready build gathers that
+    candidate again; `_decorate_corroboration` (server.py:846, 874, 883) then filters
+    origins as "pre-learned_at" and applies one field-level learned_at to all
+    members. This is the same root cause class as the stage-2 be11ee3 REJECT:
+    collapsing distinct evidence items (here a gathering at time t3 vs t1) onto a
+    single stored representative, losing the items that the requirement keeps.
+  - Generic rule: when a value's status depends on the full history of evidence
+    gathered over time, record every gathering event (identity + time) and
+    recompute from the accumulated set; never keep only a "first seen" timestamp
+    and never reuse one aggregate timestamp across distinct sub-items (members).
+    Re-gathering an already-known item IS a new standing fact. This is the second
+    occurrence of the collapse/lose-evidence root cause (first: be11ee3), so the
+    rule is promoted to Standing rules below.
+
+- 2026-11-17 (Stage 4, revision b51897c): new field omitted from one render path.
+  - Symptom: `investors` appeared on the dossier, evidence and /contested screens
+    and in the history API JSON, but the change-history screen showed no Investors
+    section (S4-51).
+  - Root cause: `webui.py:1074` kept `order = list(FIELD_ORDER) + ["executives"]`
+    from stage 3; `investors` was added to the other render paths but not to
+    `history_page`.
+  - Generic rule: when adding a new item to a fixed enumerated set (a field list),
+    update every consumer of that enumeration, not only the primary ones; derive
+    the render order from one shared definition or assert full coverage in a test,
+    so a new member cannot be silently dropped from one screen.
+
 ## Standing rules
 
-(none yet; promote a rule here when its root cause recurs.)
+- Retain every distinct evidence item; never collapse items onto a single stored
+  representative. When an item is defined by a tuple of attributes (value + source
+  page + excerpt + provider, or identity + time), deduplicate only on the full
+  identity, group by a projected attribute only downstream, and record every
+  occurrence over time rather than just the first. Applies equally to candidate
+  deduplication (be11ee3) and to time-based standing-origin tracking (b51897c).
+  (Promoted 2026-11-17 after the second occurrence.)
