@@ -19,14 +19,15 @@ def main() -> None:
     ap.add_argument("--repo", required=True)
     ap.add_argument("--kickoff", required=True)
     ap.add_argument("--checks", required=True)
+    ap.add_argument("--track", default="dossier", choices=["dossier", "toy"])
     a = ap.parse_args()
-    spec = pathlib.Path(a.kickoff, "challenges", "dossier", "spec", f"stage-{a.stage}.md").read_text()
-    copy_line = ("Start from scratch in stage-1/." if a.stage == 1 else
+    spec = pathlib.Path(a.kickoff, "challenges", a.track, "spec", f"stage-{a.stage}.md").read_text()
+    copy_line = ("Build in stage-1/. It may already hold starter files; use or replace them." if a.stage == 1 else
                  f"First copy the frozen stage-{a.stage - 1}/ folder to stage-{a.stage}/ and extend "
                  f"the copy. stage-{a.stage - 1}/ stays unchanged.")
     text = (HERE / "dispatch-template.md").read_text()
     for k, v in {"{N}": str(a.stage), "{REPO}": a.repo, "{KICKOFF}": a.kickoff,
-                 "{CHECKS}": a.checks, "{COPY_LINE}": copy_line, "{SPEC}": spec}.items():
+                 "{CHECKS}": a.checks, "{TRACK}": a.track, "{COPY_LINE}": copy_line, "{SPEC}": spec}.items():
         text = text.replace(k, v)
     print(text)
 

@@ -6,11 +6,12 @@ Target folder: stage-{N}/
 
 Deliver one self-contained service in stage-{N}/ with its own Dockerfile, RUN.md and
 complete source, built strictly from the specification below (not from any visible test
-file). Shipped checks live in the kickoff package at {KICKOFF}/challenges/dossier/test/
-and are only a partial sample of the judging suite. The reviewer runs them with:
+file). Shipped checks live in the kickoff package at {KICKOFF}/challenges/{TRACK}/test/
+and are only a partial sample of the judging suite. The reviewer runs them with
+(a fresh --out directory each run; the harness refuses an existing one):
 
     cd {KICKOFF} && . .venv/bin/activate && \
-    python -m harness run --track dossier --repo {REPO} --stage {N} --out {CHECKS}/s{N}
+    python -m harness run --track {TRACK} --repo {REPO} --stage {N} --out {CHECKS}/s{N}-$(date +%s)
 
 Constraints that apply to every stage:
 - Commit only inside {REPO}. Never amend, rebase or squash reported commits.
