@@ -242,6 +242,21 @@ def main() -> int:
                 sid = pending.pop(msg["id"], None); prompts.pop(msg["id"], None); injected.discard(msg["id"])
                 text = texts.pop(sid, ""); held.pop(sid, None)
                 note(event="inject_done", session=sid, chars=len(text), text=text[:2000], result=str(msg.get("result") or msg.get("error"))[:200])
+                req = inject_req.pop(msg["id"], {})
+                if text.strip() and not is_ack(text) and req.get("room") and req.get("as"):
+                    # Post the closing text as this seat, as Band does after a normal delivery.
+                    try:
+                        name = f".acp-quiet-reply-{seat}-{msg['id']}.txt"
+                        with open(name, "w") as fh:
+                            fh.write(text)
+                        band = shutil.which("band") or "/usr/bin/band"
+                        r = subprocess.run([band, "send", "--as", req["as"], "--body-file", name, req["room"]],
+                                           capture_output=True, text=True, timeout=60)
+                        os.remove(name)
+                        note(event="inject_reply_posted", session=sid, chars=len(text), rc=r.returncode,
+                             out=(r.stdout + r.stderr)[-300:])
+                    except Exception as e:
+                        note(event="inject_reply_error", err=repr(e)[:300])
                 return
             if isinstance(msg, dict) and isinstance(msg.get("id"), int) and msg["id"] >= 10**9 and "method" not in msg:
                 return   # responses to the proxy's own set_model/cancel requests
@@ -316,12 +331,14 @@ def main() -> int:
                     threading.Thread(target=failover, args=(rid, sid, line), daemon=True).start()
 
     injected = set()
+    inject_req = {}   # injected request id -> {room, as}
 
     def watch_inject():
         """Operator re-delivery: if <log-dir>/inject-<seat>.json names a room message
         ({"room": ..., "message_id": ...}) that the seat lost (for example a turn cancelled
         by an interrupt marks it processed), give the agent that whole numbered message as a
-        prompt. Nothing is posted by the proxy; the agent's closing text is logged, not sent."""
+        prompt. The agent's closing text is then posted as this seat (`band send --as`), exactly as
+        Band posts it after a normal delivery, unless it is a bare acknowledgement."""
         path = os.path.join(logdir, f"inject-{seat}.json")
         while child.poll() is None:
             time.sleep(2)
@@ -337,8 +354,8 @@ def main() -> int:
                 sender = req.get("sender") or ("guptashine5002/" + m.get("sender_name", ""))
                 text = (f"[INCOMING BAND MESSAGE]\nFrom: {sender} (Agent)\nRoom: {req['room']}\nMessage: {m['id']}\n\n"
                         "Re-delivered by the operator: " + req.get("why", "an earlier delivery of this message was cancelled before you saw it.") + " "
-                        "Your closing text for this turn is not posted anywhere, so send anything others need with the "
-                        "tools your mandate names.\n\nContent:\n" + (m.get("content") or ""))
+                        "Your closing text for this turn is posted to the room as your reply, as usual."
+                        "\n\nContent:\n" + (m.get("content") or ""))
                 own_id[0] += 1; rid = own_id[0]
                 msg = {"jsonrpc": "2.0", "id": rid, "method": "session/prompt",
                        "params": {"sessionId": sid, "prompt": [{"type": "text", "text": text}]}}
@@ -346,6 +363,7 @@ def main() -> int:
                 held[sid] = []; texts[sid] = ""
                 raw = (json.dumps(msg) + "\n").encode()
                 injected.add(rid); pending[rid] = sid; prompts[rid] = raw
+                inject_req[rid] = {"room": req["room"], "as": req.get("as") or (sender.split("/")[0] + "/" + seat)}
                 note(event="inject", session=sid, message=m["id"], assembled=r)
                 child.stdin.write(raw); child.stdin.flush()
             except Exception as e:
