@@ -6,10 +6,10 @@ set -euo pipefail
 REPO="${1:?absolute path of the result repository}"
 KIT="$(cd "$(dirname "$0")/.." && pwd)"
 declare -A MODEL=(
-  [coordinator]=opencode/glm-5.3-flash-free
+  [coordinator]=opencode/deepseek-v4.1-flash-free
   [implementer]=opencode/deepseek-v4.1-flash-free
   [reviewer]=opencode/big-pickle
-  [retro]=opencode/mimo-v2.6-flash-free
+  [retro]=opencode/hy4-flash-free
 )
 for seat in coordinator implementer reviewer retro; do
   band agent create --session "rf-$seat" --name "$seat" \
@@ -17,5 +17,7 @@ for seat in coordinator implementer reviewer retro; do
     --cwd "$REPO" --transport opencode \
     --runtime-model "${MODEL[$seat]}" \
     --instructions-file "$KIT/mandates/$seat.md"
+  # The thread model is what new room sessions actually launch with; set it explicitly.
+  band runtime settings --session "rf-$seat" --model "${MODEL[$seat]}"
 done
 band list

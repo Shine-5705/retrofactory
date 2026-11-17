@@ -30,6 +30,19 @@ Then: `factory/create_seats.sh /abs/path/result-repo`.
 Free models rotate daily: re-check `curl -s https://opencode.ai/zen/v1/models` before the
 submitted run and update `Model:` lines if one disappears.
 
+## 0c. Lessons from practice-1 (17 Nov)
+
+- A coordinator that slept/polled inside its turn deadlocked: Band delivers messages only
+  between turns. All mandates now carry a "Turn discipline" section.
+- The implementer started from room context before any handoff. Non-coordinator mandates
+  now say: no work until a handoff addressed to you arrives.
+- To change a seat's model, use `band runtime settings --as <owner>/<seat> --model <id>`
+  (`band runtime template set --runtime-model` did not change the launched model). Verify
+  with `band runtime template show --as <owner>/<seat> --json --reveal` → `thread.model`.
+- Only new room sessions pick up instruction/model changes: start a fresh room.
+- Keep later-stage specs out of the seats' reach (`/workspace/band/held-specs/`) until the
+  earlier folder is frozen; the harness only needs `test/` folders.
+
 ## 1. Kickoff package
 
 ```sh
