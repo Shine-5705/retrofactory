@@ -13,7 +13,7 @@ declare -A MODELS=(
   [coordinator]=opencode/glm-5.3-flash-free,opencode/longcat-2.5-free,opencode/hy4-flash-free
   [implementer]=opencode/deepseek-v4.1-flash-free,opencode/big-pickle,opencode/longcat-2.5-free
   [reviewer]=opencode/big-pickle,opencode/deepseek-v4.1-flash-free,opencode/glm-5.3-flash-free
-  [retro]=opencode/mimo-v2.6-flash-free,opencode/hy4-flash-free,opencode/nemotron-3.5-lightning-free
+  [retro]=opencode/hy4-flash-free,opencode/nemotron-3.5-lightning-free,opencode/mimo-v2.6-flash-free
 )
 for seat in coordinator implementer reviewer retro; do
   primary="${MODELS[$seat]%%,*}"

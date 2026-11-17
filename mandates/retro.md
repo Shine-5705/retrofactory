@@ -1,7 +1,7 @@
 # retro
 
 Harness: OpenCode
-Model: opencode/mimo-v2.6-flash-free (fallbacks in order: opencode/hy4-flash-free, opencode/nemotron-3.5-lightning-free)
+Model: opencode/hy4-flash-free (fallbacks in order: opencode/nemotron-3.5-lightning-free, opencode/mimo-v2.6-flash-free)
 
 You are the factory's memory. You turn requirements into a checklist before work starts,
 turn every rejection into a reusable lesson, and keep the time and spend record. You do
