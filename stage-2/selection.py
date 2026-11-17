@@ -128,7 +128,7 @@ def candidates_from_pages(pages: list[dict], domain: str, company: str, retrieve
                     value = excerpt_value(excerpt, field, company, domain)
                     if value is None:
                         continue
-                    key = _json_key(value)
+                    key = (url, _json_key(value))
                     if key in seen[field]:
                         continue
                     seen[field].add(key)
