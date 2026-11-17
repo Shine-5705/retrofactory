@@ -38,6 +38,9 @@ FIELD_HINTS = {
     "funding_total": "Total equity funding raised",
 }
 
+EXEC_LABELS = {"cfo": "Chief financial officer", "coo": "Chief operating officer", "cto": "Chief technology officer"}
+EXEC_ORDER = ("cfo", "coo", "cto")
+
 STATUS_LABELS = {"known": "Known", "contested": "Contested", "unknown": "Unknown"}
 KIND_LABELS = {
     "own": "Own site",
@@ -223,6 +226,13 @@ button[disabled]{opacity:.6;cursor:progress}
 .evidence-group{margin-bottom:18px}
 .evidence-group h2{display:flex;gap:10px;align-items:baseline;flex-wrap:wrap;margin-bottom:10px}
 .empty-note{color:var(--muted);font-size:.9rem;margin:0;padding:10px 0}
+.exec-list{list-style:none;margin:10px 0 0;padding:0;display:flex;flex-direction:column;gap:8px}
+.exec-member{display:flex;gap:12px;align-items:baseline;flex-wrap:wrap;border-top:1px solid var(--line);padding-top:8px}
+.exec-member:first-child{border-top:0;padding-top:0}
+.exec-role{color:var(--muted);font-size:.86rem;font-weight:650;min-width:180px}
+.exec-name{font-weight:700;font-size:1.05rem}
+.history-entry{display:flex;gap:10px;align-items:baseline;flex-wrap:wrap;background:var(--card);border:1px solid var(--line);border-radius:10px;padding:10px 12px}
+.history-value{font-weight:650}
 .contested-list{list-style:none;margin:0;padding:0;display:flex;flex-direction:column;gap:10px}
 .contested-item{background:var(--card);border:1px solid var(--line);border-radius:12px;padding:14px 16px;min-width:0}
 .contested-item .ci-head{display:flex;gap:8px;align-items:baseline;flex-wrap:wrap;margin-bottom:4px}
@@ -391,6 +401,27 @@ DOSSIER_SCRIPT = r"""
     return parts.join('');
   }
 
+  const EXEC_ORDER=['cfo','coo','cto'];
+  const EXEC_LABELS={cfo:'Chief financial officer',coo:'Chief operating officer',cto:'Chief technology officer'};
+  function execHtml(entry){
+    entry=entry||{};
+    const status=entry.status||'unknown';
+    const members={};
+    (entry.value||[]).forEach(function(m){if(m&&EXEC_ORDER.indexOf(m.title)>=0)members[m.title]=m.name;});
+    const parts=['<section class="field executive-field" data-status="'+esc(status)+'">'];
+    parts.push('<div class="field-head"><h2>Executive team</h2><span class="badge status-'+esc(status)+'">'+esc(STATUS[status]||status)+'</span><span class="field-hint">Chief financial, operating and technology officers</span></div>');
+    const present=EXEC_ORDER.filter(function(t){return t in members;});
+    if(present.length){
+      parts.push('<ul class="exec-list">');
+      present.forEach(function(t){parts.push('<li class="exec-member"><span class="exec-role">'+esc(EXEC_LABELS[t])+'</span><span class="exec-name">'+esc(members[t])+'</span></li>');});
+      parts.push('</ul>');
+    }else{
+      parts.push('<p class="field-value empty-value">No named executives in the evidence yet</p>');
+    }
+    parts.push('</section>');
+    return parts.join('');
+  }
+
   function render(data){
     const stateEl=qs('[data-testid="dossier-state"]');
     if(stateEl){stateEl.textContent=data.state;stateEl.className='badge state-'+data.state;stateEl.setAttribute('data-state',data.state);}
@@ -404,6 +435,8 @@ DOSSIER_SCRIPT = r"""
     if(fieldsHost){
       fieldsHost.innerHTML=FIELD_ORDER.map(function(f){return fieldHtml(f,data.fields?data.fields[f]:null);}).join('');
     }
+    const execHost=qs('#dossier-executives');
+    if(execHost){execHost.innerHTML=execHtml(data.fields?data.fields.executives:null);}
     schedulePoll(data.state);
   }
 
@@ -670,6 +703,44 @@ def list_page(
     return _layout("Dossiers", body, user=user, active="dossiers", page_script=LIST_SCRIPT)
 
 
+def _exec_members(fields: dict) -> dict:
+    entry = fields.get("executives") or {}
+    members = {}
+    for member in entry.get("value") or []:
+        if isinstance(member, dict) and member.get("title") in EXEC_ORDER:
+            members[member["title"]] = member.get("name")
+    return members
+
+
+def executives_html(fields: dict) -> str:
+    entry = fields.get("executives") or {}
+    status = entry.get("status") or "unknown"
+    members = _exec_members(fields)
+    candidates = entry.get("candidates") or []
+    parts = [
+        '<section class="field executive-field" data-status="' + esc(status) + '">',
+        '<div class="field-head"><h2>Executive team</h2>'
+        '<span class="badge status-' + esc(status) + '">' + esc(STATUS_LABELS.get(status, status)) + '</span>'
+        '<span class="field-hint">Chief financial, operating and technology officers</span></div>',
+    ]
+    if members:
+        parts.append('<ul class="exec-list">')
+        for title in EXEC_ORDER:
+            if title in members:
+                parts.append(
+                    '<li class="exec-member"><span class="exec-role">' + esc(EXEC_LABELS[title]) + '</span>'
+                    '<span class="exec-name">' + esc(members[title]) + '</span></li>'
+                )
+        parts.append('</ul>')
+    else:
+        parts.append('<p class="field-value empty-value">No named executives in the evidence yet</p>')
+    if candidates:
+        parts.append('<p class="hint" style="margin-top:10px">')
+        parts.append(esc(str(len(candidates))) + ' named candidates across the three roles.</p>')
+    parts.append('</section>')
+    return "".join(parts)
+
+
 def _fields_html(fields: dict) -> str:
     parts = []
     for field in FIELD_ORDER:
@@ -755,7 +826,10 @@ def dossier_page(
             f"{researched}"
             "</div>"
         )
-        fields_html = f'<div class="fields" id="dossier-fields">{_fields_html(data.get("fields") or {})}</div>'
+        fields_html = (
+            f'<div class="fields" id="dossier-fields">{_fields_html(data.get("fields") or {})}</div>'
+            f'<div id="dossier-executives">{executives_html(data.get("fields") or {})}</div>'
+        )
 
     body = f"""<div data-dossier data-domain="{esc(domain)}" data-state="{esc(state)}">
 <div class="dossier-head">
@@ -765,6 +839,7 @@ def dossier_page(
 </div>
 <div class="actions">
 <a class="button secondary" href="/dossiers/{esc(domain)}/evidence" data-testid="dossier-evidence-link">View evidence</a>
+<a class="button secondary" href="/dossiers/{esc(domain)}/history">Change history</a>
 <button class="secondary" type="button" data-testid="dossier-reload">Reload</button>
 <button class="primary" type="button" data-testid="dossier-refresh">Refresh</button>
 </div>
@@ -832,11 +907,43 @@ def evidence_page(data: dict, *, user: dict | None = None) -> str:
         parts.append("</section>")
         groups.append("".join(parts))
 
+    exec_entry = (data.get("fields") or {}).get("executives") or {}
+    exec_candidates = exec_entry.get("candidates") or []
+    exec_parts = ['<section class="evidence-group executive-field">']
+    exec_parts.append(
+        '<h2>Executive team '
+        f'<span class="badge status-{esc(exec_entry.get("status") or "unknown")}">'
+        f'{esc(STATUS_LABELS.get(exec_entry.get("status") or "unknown", ""))}</span></h2>'
+    )
+    if exec_candidates:
+        exec_parts.append('<ol class="candidates">')
+        for candidate in exec_candidates:
+            title = candidate.get("title")
+            exec_parts.append(
+                '<li class="candidate" data-selected="' + ("true" if candidate.get("selected") else "false") + '">'
+                '<div class="cand-head">'
+                + ('<span class="badge status-known">Selected</span>' if candidate.get("selected") else "")
+                + f'<span class="chip kind">{esc(EXEC_LABELS.get(title, title or ""))}</span>'
+                + f'<span class="chip">{esc(PROVIDER_LABELS.get(candidate.get("provider"), candidate.get("provider") or ""))}</span>'
+                + '</div>'
+                + f'<p class="cand-value">{esc(candidate.get("value") or "")}</p>'
+                + f"<blockquote>{esc(candidate.get('excerpt') or '')}</blockquote>"
+                + '<div class="cand-foot">'
+                + f'<a href="{esc(candidate.get("url") or "")}" rel="noreferrer noopener">{esc(candidate.get("url") or "")}</a>'
+                + '</div></li>'
+            )
+        exec_parts.append('</ol>')
+    else:
+        exec_parts.append('<p class="empty-note">No named executives for this company.</p>')
+    exec_parts.append('</section>')
+    groups.append("".join(exec_parts))
+
     body = f"""<p class="eyebrow">Evidence</p>
 <h1>Evidence for {esc(domain)}</h1>
 <p class="lede">Every value the gathered pages support, in the order the selection rule ranks them. The selected value sits first.</p>
 <div class="actions" style="margin-bottom:20px">
 <a class="button secondary" href="/dossiers/{esc(domain)}">Back to dossier</a>
+<a class="button secondary" href="/dossiers/{esc(domain)}/history">Change history</a>
 </div>
 {''.join(groups)}"""
     return _layout(
@@ -887,3 +994,50 @@ def contested_page(items: list[dict], *, user: dict | None = None) -> str:
 {list_html}
 {empty_html}"""
     return _layout("Contested fields", body, user=user, active="contested")
+
+
+def history_page(domain: str, history: dict, *, user: dict | None = None) -> str:
+    labels = dict(FIELD_LABELS)
+    labels["executives"] = "Executive team"
+    order = list(FIELD_ORDER) + ["executives"]
+    sections = []
+    for field in order:
+        entries = history.get(field) or []
+        rows = []
+        for entry in entries:
+            value = entry.get("value")
+            if field == "executives" and isinstance(value, list):
+                shown = ", ".join(
+                    f"{m.get('title', '').upper()} {m.get('name', '')}"
+                    for m in value
+                    if isinstance(m, dict)
+                )
+            else:
+                shown = value_text(field, value) if field != "executives" else ("" if value is None else str(value))
+            if value is None:
+                shown = "Not found"
+            rows.append(
+                '<li class="history-entry">'
+                f'<span class="badge status-{esc(entry.get("type")) if entry.get("type") in ("known", "contested", "unknown") else "known"}">{esc(entry.get("type"))}</span> '
+                f'<span class="history-value">{esc(shown)}</span>'
+                f'<span class="hint">true from {esc(entry.get("true_from") or "unknown")} · learned {esc(formatted_time(entry.get("learned_at")) or "unknown")}</span>'
+                '</li>'
+            )
+        if rows:
+            sections.append(
+                f'<section class="evidence-group"><h2>{esc(labels.get(field, field))}</h2>'
+                f'<ul class="list">{"".join(rows)}</ul></section>'
+            )
+        else:
+            sections.append(
+                f'<section class="evidence-group"><h2>{esc(labels.get(field, field))}</h2>'
+                '<p class="empty-note">No recorded changes yet.</p></section>'
+            )
+    body = f"""<p class="eyebrow">History</p>
+<h1>Change history for {esc(domain)}</h1>
+<p class="lede">Every selected value the dossier has held, oldest first, with when the evidence says it took effect and when this service learned it.</p>
+<div class="actions" style="margin-bottom:20px">
+<a class="button secondary" href="/dossiers/{esc(domain)}">Back to dossier</a>
+</div>
+{''.join(sections)}"""
+    return _layout(f"History — {domain}", body, user=user, active="dossiers")

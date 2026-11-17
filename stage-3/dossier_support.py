@@ -332,12 +332,14 @@ def _hq_values(text: str) -> list[tuple[object, int, int]]:
     return values
 
 
-def _ceo_values(text: str, company: str, domain: str) -> list[tuple[object, int, int]]:
+def _person_values(
+    text: str, company: str, domain: str, phrases: list[str]
+) -> list[tuple[object, int, int]]:
     chars = list(text)
     for start, end in find_phrase_spans(text, company) + find_phrase_spans(text, domain):
         for i in range(start, end):
             chars[i] = "\x00"
-    for phrase in STATEMENT_PHRASES["ceo"]:
+    for phrase in phrases:
         for start, end in find_phrase_spans(text, phrase):
             for i in range(start, end):
                 chars[i] = "\x00"
@@ -373,6 +375,10 @@ def _ceo_values(text: str, company: str, domain: str) -> list[tuple[object, int,
         if len(words) in (2, 3):
             values.append((text[start:end], start, end))
     return values
+
+
+def _ceo_values(text: str, company: str, domain: str) -> list[tuple[object, int, int]]:
+    return _person_values(text, company, domain, STATEMENT_PHRASES["ceo"])
 
 
 def amount_spans(text: str) -> list[tuple[int, int, object]]:
@@ -473,6 +479,48 @@ def excerpt_value(excerpt: str, field: str, company: str, domain: str) -> object
     if not values:
         return None
     normalised = {value for value, _, _ in values}
+    if len(normalised) != 1:
+        return None
+    return next(iter(normalised))
+
+
+# --------------------------------------------------------------------------
+# Executives: each title is a field with the format and normalisation of ceo.
+
+EXEC_TITLES = ("cfo", "coo", "cto")
+
+EXEC_STATEMENT_PHRASES = {
+    "cfo": ["chief financial officer", "CFO"],
+    "coo": ["chief operating officer", "COO"],
+    "cto": ["chief technology officer", "CTO"],
+}
+
+
+def executive_values(
+    excerpt: str, title: str, company: str, domain: str
+) -> list[tuple[object, int, int]]:
+    text = collapse_ws(excerpt)
+    return _person_values(text, company, domain, EXEC_STATEMENT_PHRASES[title])
+
+
+def executive_value(
+    excerpt: str, title: str, company: str, domain: str
+) -> object | None:
+    text = collapse_ws(excerpt)
+    if not text:
+        return None
+    if not is_single_sentence(text):
+        return None
+    if not (find_phrase_spans(text, domain) or find_phrase_spans(text, company)):
+        return None
+    if not has_any_phrase(text, EXEC_STATEMENT_PHRASES[title]):
+        return None
+    if has_any_phrase(text, NEGATING_PHRASES):
+        return None
+    values = executive_values(text, title, company, domain)
+    if not values:
+        return None
+    normalised = {str(value) for value, _, _ in values}
     if len(normalised) != 1:
         return None
     return next(iter(normalised))

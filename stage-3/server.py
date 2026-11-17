@@ -1,9 +1,9 @@
-"""Dossier stage 1 service.
+"""Dossier service (stage 3): change over time, executives, history and a feed.
 
-A small threaded HTTP service.  All state lives in memory; reset, export and
-import replace it atomically.  Background builds research a domain through
-WebRouter (Nimble) and decide each field only from provider-served text using
-the Appendix A support rules in dossier_support.py.
+A small threaded HTTP service.  All state is held in memory and mirrored to the
+container filesystem so it survives a container restart.  Background builds
+research a domain through WebRouter (Nimble) and decide each field only from
+provider-served text using the Appendix A support rules in dossier_support.py.
 """
 
 from __future__ import annotations
@@ -13,6 +13,7 @@ import json
 import os
 import re
 import secrets
+import tempfile
 import threading
 import time
 from datetime import datetime, timezone
@@ -22,18 +23,29 @@ from werkzeug.exceptions import HTTPException
 from werkzeug.security import check_password_hash, generate_password_hash
 
 from dossier_support import (
+    EXEC_TITLES,
     FIELDS,
     collapse_ws,
     excerpt_value,
     split_prose,
     split_sentences,
 )
-from selection import candidates_from_pages, imported_field, rebuild_field_from_candidates
+from pages import parse_page_details
+from selection import (
+    ALL_FIELDS,
+    assemble_executives,
+    assemble_field,
+    collect_candidates,
+    imported_field,
+    rebuild_field_from_candidates,
+    same_json_value,
+)
 from webui import (
     auth_page,
     contested_page,
     dossier_page,
     evidence_page,
+    history_page,
     list_page,
     message_page,
 )
@@ -47,6 +59,7 @@ MAX_UNITS = 80
 _EMAIL_RE = re.compile(r"^[^@\s]+@[^@\s]+$")
 _DOMAIN_LABEL_RE = re.compile(r"^[a-z0-9-]+$")
 _INT_QUERY_RE = re.compile(r"^[0-9]+$")
+_DATE_ONLY_RE = re.compile(r"^(\d{4})-(\d{2})-(\d{2})$")
 
 _STRING_FIELDS = {"legal_name", "hq_city", "ceo", "headcount_range"}
 _INT_FIELDS = {"founded_year", "funding_total"}
@@ -65,7 +78,7 @@ def now_iso(dt: datetime) -> str:
     return dt.isoformat()
 
 
-def parse_rfc3339(value: str) -> datetime | None:
+def parse_rfc3339(value: object) -> datetime | None:
     if not isinstance(value, str) or not value.strip():
         return None
     text = value.strip()
@@ -78,6 +91,19 @@ def parse_rfc3339(value: str) -> datetime | None:
     if parsed.tzinfo is None:
         return None
     return parsed
+
+
+def parse_date_only(value: object) -> str | None:
+    if not isinstance(value, str):
+        return None
+    match = _DATE_ONLY_RE.match(value.strip())
+    if not match:
+        return None
+    try:
+        parsed = datetime.strptime(value.strip(), "%Y-%m-%d")
+    except ValueError:
+        return None
+    return parsed.date().isoformat()
 
 
 def normalise_domain(raw: object) -> str:
@@ -107,11 +133,19 @@ def company_name(domain: str) -> str:
     return domain.split(".", 1)[0].replace("-", " ")
 
 
-def empty_fields() -> dict:
+def empty_field() -> dict:
     return {
-        field: {"value": None, "status": "unknown", "citations": [], "candidates": []}
-        for field in FIELDS
+        "value": None,
+        "status": "unknown",
+        "citations": [],
+        "candidates": [],
+        "true_from": None,
+        "learned_at": None,
     }
+
+
+def empty_fields() -> dict:
+    return {field: empty_field() for field in ALL_FIELDS}
 
 
 # --------------------------------------------------------------------------
@@ -129,6 +163,9 @@ class State:
         self.idem: dict[tuple, dict] = {}
         self.next_user = 1
         self.next_dossier = 1
+        self.next_seq = 1
+        self.next_build_seq = 1
+        self.feed: list[dict] = []
 
     def now(self) -> datetime:
         if self.frozen_clock is not None:
@@ -142,6 +179,128 @@ _STATE = State()
 
 def get_state() -> State:
     return _STATE
+
+
+# --------------------------------------------------------------------------
+# Persistence: the container filesystem is the durable disk row.
+
+
+def _state_path() -> str:
+    explicit = os.environ.get("DOSSIER_STATE_FILE")
+    if explicit:
+        return explicit
+    directory = os.environ.get("DOSSIER_STATE_DIR")
+    candidates = []
+    if directory:
+        candidates.append(directory)
+    candidates.append("/app/state")
+    candidates.append(os.path.join(os.path.dirname(os.path.abspath(__file__)), "state"))
+    for candidate in candidates:
+        try:
+            os.makedirs(candidate, exist_ok=True)
+            if os.access(candidate, os.W_OK):
+                return os.path.join(candidate, "state.json")
+        except OSError:
+            continue
+    fallback = os.path.join(tempfile.gettempdir(), "dossier-state")
+    os.makedirs(fallback, exist_ok=True)
+    return os.path.join(fallback, "state.json")
+
+
+_STATE_FILE = _state_path()
+
+
+def _serialise_dossier(dossier: dict, building_as_before: bool = True) -> dict:
+    building = bool(dossier.get("building"))
+    if building and building_as_before:
+        outcome = dossier.get("last_outcome") or "failed"
+        spent = dossier.get("base_spent", dossier.get("spent_units", 0))
+    else:
+        outcome = dossier.get("state")
+        spent = dossier.get("spent_units", 0)
+    return {
+        "id": dossier["id"],
+        "domain": dossier["domain"],
+        "state": outcome,
+        "last_outcome": dossier.get("last_outcome"),
+        "researched_at": dossier.get("researched_at"),
+        "spent_units": spent,
+        "base_spent": dossier.get("base_spent", spent),
+        "fields": copy.deepcopy(dossier["fields"]),
+        "builds": copy.deepcopy(dossier.get("builds", [])),
+        "history": copy.deepcopy(dossier.get("history", {})),
+        "gathered": dict(dossier.get("gathered", {})),
+        "has_ready": bool(dossier.get("has_ready")),
+        "building": building,
+    }
+
+
+def _serialise_state(state: State) -> dict:
+    idempotency = []
+    for (user_id, method, path, key), record in state.idem.items():
+        idempotency.append(
+            {
+                "user_id": user_id,
+                "method": method,
+                "path": path,
+                "key": key,
+                "body": record["body"],
+                "response": copy.deepcopy(record["response"]),
+            }
+        )
+    return {
+        "clock": now_iso(state.frozen_clock) if state.frozen_clock is not None else None,
+        "users": [
+            {
+                "id": user["id"],
+                "email": user["email"],
+                "display_name": user["display_name"],
+                "password_hash": user["password_hash"],
+            }
+            for user in state.users.values()
+        ],
+        "tokens": dict(state.tokens),
+        "dossiers": [_serialise_dossier(d) for d in state.dossiers.values()],
+        "idempotency": idempotency,
+        "next_user": state.next_user,
+        "next_dossier": state.next_dossier,
+        "stage3": {
+            "feed": copy.deepcopy(state.feed),
+            "next_seq": state.next_seq,
+            "next_build_seq": state.next_build_seq,
+        },
+    }
+
+
+def _write_state(data: dict) -> None:
+    try:
+        directory = os.path.dirname(_STATE_FILE)
+        os.makedirs(directory, exist_ok=True)
+        fd, temp_path = tempfile.mkstemp(dir=directory, prefix=".state-", suffix=".json")
+        try:
+            with os.fdopen(fd, "w", encoding="utf-8") as handle:
+                json.dump(data, handle, ensure_ascii=False, separators=(",", ":"))
+                handle.flush()
+                os.fsync(handle.fileno())
+            os.replace(temp_path, _STATE_FILE)
+        finally:
+            if os.path.exists(temp_path):
+                try:
+                    os.remove(temp_path)
+                except OSError:
+                    pass
+    except OSError:
+        pass
+
+
+def persist_state(state: State | None = None) -> None:
+    target = state if state is not None else _STATE
+    with target.lock:
+        with _GLOBAL_LOCK:
+            if target is not _STATE:
+                return
+            data = _serialise_state(target)
+            _write_state(data)
 
 
 # --------------------------------------------------------------------------
@@ -246,6 +405,18 @@ def token_for_user(state: State) -> str:
             return token
 
 
+def integer_query(name: str, default: int | None, minimum: int, maximum: int | None) -> tuple[int | None, Response | None]:
+    raw = request.args.get(name)
+    if raw is None:
+        return default, None
+    if not _INT_QUERY_RE.match(raw):
+        return None, validation_error(f"{name} must be plain decimal digits")
+    value = int(raw)
+    if value < minimum or (maximum is not None and value > maximum):
+        return None, validation_error(f"{name} is out of range")
+    return value, None
+
+
 # --------------------------------------------------------------------------
 # Representation
 
@@ -269,8 +440,26 @@ def dossier_brief(dossier: dict) -> dict:
     }
 
 
-def request_payload(dossier: dict, status: int) -> Response:
-    return json_response(dossier_brief(dossier), status)
+def _build_time(build: dict) -> datetime | None:
+    return parse_rfc3339(build.get("time"))
+
+
+def _builds_at(dossier: dict, as_of: datetime, ready_only: bool) -> list[dict]:
+    chosen = []
+    for build in dossier.get("builds", []):
+        when = _build_time(build)
+        if when is None:
+            continue
+        if when <= as_of and (not ready_only or build.get("outcome") == "ready"):
+            chosen.append(build)
+    chosen.sort(key=lambda b: (b.get("seq", 0)))
+    return chosen
+
+
+def _field_selected_learned(field_entry: dict) -> str | None:
+    if not isinstance(field_entry, dict) or field_entry.get("value") is None:
+        return None
+    return field_entry.get("learned_at")
 
 
 # --------------------------------------------------------------------------
@@ -359,10 +548,7 @@ class Deadline:
 
 
 def _with_429(state: State, dossier: dict, cost: int, deadline: Deadline, call):
-    """Make one provider call, retrying a 429 after a full second, up to three times.
-
-    A call answered 429 costs nothing, so each attempt reserves and then refunds.
-    """
+    """Make one provider call, retrying a 429 after a full second, up to three times."""
     attempts = 0
     while True:
         if not _reserve(state, dossier, cost):
@@ -503,6 +689,227 @@ _EXTRA_QUERIES = [
 ]
 
 
+# --------------------------------------------------------------------------
+# Builds, learned_at, history and the change feed
+
+
+def _identity_value(value: object) -> str:
+    if isinstance(value, str):
+        return "s:" + value.strip()
+    return "j:" + json.dumps(value, sort_keys=True, ensure_ascii=False)
+
+
+def candidate_identity(field: str, candidate: dict) -> str:
+    parts = [field]
+    if field == "executives":
+        parts.append(str(candidate.get("title") or ""))
+    parts.append(_identity_value(candidate.get("value")))
+    parts.append(str(candidate.get("url") or ""))
+    parts.append(str(candidate.get("provider") or ""))
+    return json.dumps(parts, ensure_ascii=False)
+
+
+def _assign_learned(dossier: dict, raw: dict[str, list[dict]], build_time: str) -> None:
+    gathered = dossier.setdefault("gathered", {})
+    for field in ALL_FIELDS:
+        for candidate in raw.get(field, []):
+            key = candidate_identity(field, candidate)
+            if key in gathered:
+                candidate["learned_at"] = gathered[key]
+            else:
+                gathered[key] = build_time
+                candidate["learned_at"] = build_time
+
+
+def _page_versions(pages: list[dict], raw: dict[str, list[dict]], domain: str) -> list[dict]:
+    versions: dict[str, dict] = {}
+    for page in pages:
+        url = (page.get("url") or "").strip()
+        text = page.get("text") or ""
+        if not url or not text:
+            continue
+        details = parse_page_details(text, url, domain)
+        if url not in versions:
+            versions[url] = {
+                "url": url,
+                "true_from": details["true_from"],
+                "candidates": [],
+            }
+    for field in ALL_FIELDS:
+        for candidate in raw.get(field, []):
+            url = candidate.get("url") or ""
+            version = versions.get(url)
+            if version is None:
+                version = {"url": url, "true_from": candidate.get("true_from"), "candidates": []}
+                versions[url] = version
+            version["candidates"].append(
+                {
+                    "field": field,
+                    "title": candidate.get("title"),
+                    "value": candidate.get("value"),
+                    "url": url,
+                    "excerpt": candidate.get("excerpt") or "",
+                    "provider": candidate.get("provider") or "",
+                    "kind": candidate.get("kind"),
+                    "published_at": candidate.get("published_at"),
+                    "true_from": candidate.get("true_from"),
+                    "retrieved_at": candidate.get("retrieved_at"),
+                    "learned_at": candidate.get("learned_at"),
+                }
+            )
+    return list(versions.values())
+
+
+def _selected_members(field_entry: dict) -> dict[str, tuple[object, object]]:
+    members: dict[str, tuple[object, object]] = {}
+    for candidate in field_entry.get("candidates") or []:
+        if not isinstance(candidate, dict) or not candidate.get("selected"):
+            continue
+        title = candidate.get("title")
+        if title in EXEC_TITLES:
+            members[title] = (candidate.get("value"), candidate.get("true_from"))
+    if not members:
+        for member in field_entry.get("value") or []:
+            if isinstance(member, dict) and member.get("title") in EXEC_TITLES:
+                members[member["title"]] = (member.get("name"), None)
+    return members
+
+
+def _exec_entry_type(earlier: dict, new: dict) -> str:
+    old = _selected_members(earlier)
+    now = _selected_members(new)
+    differing = []
+    for title in set(old) | set(now):
+        in_old = title in old
+        in_new = title in now
+        if in_old != in_new:
+            differing.append(title)
+        elif not same_json_value(old[title][0], now[title][0]):
+            differing.append(title)
+    if not differing:
+        return "change"
+    for title in differing:
+        if title not in old or title not in now:
+            return "change"
+        old_date = old[title][1]
+        new_date = now[title][1]
+        if old_date is None or new_date is None:
+            return "change"
+        if not (str(new_date) <= str(old_date)):
+            return "change"
+    return "correction"
+
+
+def _entry_type(field: str, earlier: dict, new: dict) -> str:
+    if field == "executives":
+        return _exec_entry_type(earlier, new)
+    old_value = earlier.get("value")
+    new_value = new.get("value")
+    if old_value is None or new_value is None:
+        return "change"
+    old_date = earlier.get("true_from")
+    new_date = new.get("true_from")
+    if old_date is None or new_date is None:
+        return "change"
+    return "correction" if str(new_date) <= str(old_date) else "change"
+
+
+def _finish_ready(
+    state: State,
+    dossier: dict,
+    build_time: str,
+    raw: dict[str, list[dict]],
+    versions: list[dict],
+) -> None:
+    build_seq = state.next_build_seq
+    state.next_build_seq += 1
+    previous_fields = dossier["fields"]
+    first_ready = not dossier.get("has_ready")
+
+    new_fields: dict[str, dict] = {}
+    for field in FIELDS:
+        new_fields[field] = assemble_field(raw[field])
+    new_fields["executives"] = assemble_executives(raw["executives"])
+
+    for field in ALL_FIELDS:
+        entry = new_fields[field]
+        if entry.get("value") is None:
+            entry["true_from"] = None
+            entry["learned_at"] = None
+            continue
+        previous = previous_fields.get(field) or {}
+        if (
+            first_ready
+            or previous.get("value") is None
+            or not same_json_value(previous.get("value"), entry.get("value"))
+            or previous.get("learned_at") is None
+        ):
+            entry["learned_at"] = build_time
+        else:
+            entry["learned_at"] = previous.get("learned_at")
+
+    feed_entries: list[dict] = []
+    for field in ALL_FIELDS:
+        entry = new_fields[field]
+        previous = previous_fields.get(field) or {}
+        if first_ready:
+            if entry.get("value") is not None:
+                dossier["history"].setdefault(field, []).append(
+                    {
+                        "type": "initial",
+                        "value": copy.deepcopy(entry.get("value")),
+                        "true_from": entry.get("true_from"),
+                        "learned_at": build_time,
+                        "citations": copy.deepcopy(entry.get("citations") or []),
+                    }
+                )
+            continue
+        if same_json_value(previous.get("value"), entry.get("value")):
+            continue
+        entry_type = _entry_type(field, previous, entry)
+        dossier["history"].setdefault(field, []).append(
+            {
+                "type": entry_type,
+                "value": copy.deepcopy(entry.get("value")),
+                "true_from": entry.get("true_from"),
+                "learned_at": build_time,
+                "citations": copy.deepcopy(entry.get("citations") or []),
+            }
+        )
+        feed_entries.append(
+            {
+                "domain": dossier["domain"],
+                "field": field,
+                "type": entry_type,
+                "from": copy.deepcopy(previous.get("value")),
+                "to": copy.deepcopy(entry.get("value")),
+                "true_from": entry.get("true_from"),
+                "learned_at": build_time,
+            }
+        )
+
+    for entry in feed_entries:
+        entry["seq"] = state.next_seq
+        state.next_seq += 1
+        state.feed.append(entry)
+
+    dossier["fields"] = new_fields
+    dossier["researched_at"] = build_time
+    dossier["state"] = "ready"
+    dossier["last_outcome"] = "ready"
+    dossier["has_ready"] = True
+    dossier["builds"].append(
+        {
+            "seq": build_seq,
+            "time": build_time,
+            "outcome": "ready",
+            "spent": dossier["build_spent"],
+            "fields": copy.deepcopy(new_fields),
+            "versions": versions,
+        }
+    )
+
+
 def _build_worker(state: State, dossier: dict, build_time: datetime, generation: int) -> None:
     deadline = Deadline(288.0)
     urls: list[str] = []
@@ -511,6 +918,7 @@ def _build_worker(state: State, dossier: dict, build_time: datetime, generation:
     any_success = False
     domain = dossier["domain"]
     company = company_name(domain)
+    build_iso = now_iso(build_time)
 
     try:
         router_ok = True
@@ -520,7 +928,6 @@ def _build_worker(state: State, dossier: dict, build_time: datetime, generation:
             router_ok = False
 
         if router_ok:
-            # Exactly one successful search whose query is the normalised domain.
             response = _do_search(state, dossier, domain, 1, deadline)
             if response is not None:
                 any_success = True
@@ -561,9 +968,12 @@ def _build_worker(state: State, dossier: dict, build_time: datetime, generation:
                 any_success = True
                 pages.extend(_extract_text(extracted, url))
 
-        fields = candidates_from_pages(pages, domain, company, now_iso(build_time))
+        raw = collect_candidates(pages, domain, company, build_iso)
+        _assign_learned(dossier, raw, build_iso)
+        versions = _page_versions(pages, raw, domain)
     except Exception:
-        fields = empty_fields()
+        raw = {field: [] for field in ALL_FIELDS}
+        versions = []
         any_success = False
 
     with state.lock:
@@ -571,13 +981,22 @@ def _build_worker(state: State, dossier: dict, build_time: datetime, generation:
             return
         dossier["building"] = False
         if any_success:
-            dossier["fields"] = fields
-            dossier["researched_at"] = now_iso(build_time)
-            dossier["state"] = "ready"
-            dossier["last_outcome"] = "ready"
+            _finish_ready(state, dossier, build_iso, raw, versions)
         else:
             dossier["state"] = "failed"
             dossier["last_outcome"] = "failed"
+            dossier["builds"].append(
+                {
+                    "seq": state.next_build_seq,
+                    "time": build_iso,
+                    "outcome": "failed",
+                    "spent": dossier["build_spent"],
+                    "fields": None,
+                    "versions": [],
+                }
+            )
+            state.next_build_seq += 1
+    persist_state(state)
 
 
 def start_build(state: State, dossier: dict, build_time: datetime) -> None:
@@ -593,6 +1012,26 @@ def start_build(state: State, dossier: dict, build_time: datetime) -> None:
         daemon=True,
     )
     thread.start()
+
+
+def _new_dossier(dossier_id: str, domain: str) -> dict:
+    return {
+        "id": dossier_id,
+        "domain": domain,
+        "state": "building",
+        "last_outcome": None,
+        "fields": empty_fields(),
+        "researched_at": None,
+        "spent_units": 0,
+        "base_spent": 0,
+        "build_spent": 0,
+        "building": False,
+        "build_gen": 0,
+        "builds": [],
+        "history": {field: [] for field in ALL_FIELDS},
+        "gathered": {},
+        "has_ready": False,
+    }
 
 
 # --------------------------------------------------------------------------
@@ -640,24 +1079,6 @@ def _fixture_state(fixture: object, clock_now: datetime) -> State | None:
 
 def _export_state(state: State) -> dict:
     with state.lock:
-        dossiers = []
-        for dossier in state.dossiers.values():
-            if dossier["building"]:
-                exported_state = dossier["last_outcome"] or "failed"
-                spent = dossier["base_spent"]
-            else:
-                exported_state = dossier["state"]
-                spent = dossier["spent_units"]
-            dossiers.append(
-                {
-                    "id": dossier["id"],
-                    "domain": dossier["domain"],
-                    "state": exported_state,
-                    "researched_at": dossier["researched_at"],
-                    "spent_units": spent,
-                    "fields": copy.deepcopy(dossier["fields"]),
-                }
-            )
         idempotency = []
         for (user_id, method, path, key), record in state.idem.items():
             idempotency.append(
@@ -681,10 +1102,15 @@ def _export_state(state: State) -> dict:
                 for user in state.users.values()
             ],
             "tokens": dict(state.tokens),
-            "dossiers": dossiers,
+            "dossiers": [_serialise_dossier(d) for d in state.dossiers.values()],
             "idempotency": idempotency,
             "next_user": state.next_user,
             "next_dossier": state.next_dossier,
+            "stage3": {
+                "feed": copy.deepcopy(state.feed),
+                "next_seq": state.next_seq,
+                "next_build_seq": state.next_build_seq,
+            },
         }
 
 
@@ -702,13 +1128,189 @@ def _valid_field_entry(entry: object) -> bool:
     return entry.get("value") is not None and len(entry["citations"]) >= 1
 
 
-def _imported_field(entry: dict, researched_at: str | None) -> dict:
-    value = entry.get("value")
-    candidates = entry.get("candidates")
-    if isinstance(candidates, list):
-        return rebuild_field_from_candidates(value, candidates)
-    citations = entry.get("citations") or []
-    return imported_field(value, citations, researched_at)
+def _published_true_from(candidate: dict) -> str | None:
+    explicit = candidate.get("true_from")
+    if isinstance(explicit, str) and explicit:
+        return explicit
+    published = candidate.get("published_at")
+    if isinstance(published, str) and published:
+        parsed = parse_rfc3339(published)
+        if parsed is not None:
+            return parsed.astimezone(timezone.utc).date().isoformat()
+    return None
+
+
+def _legacy_stage2_candidates(entry: dict) -> list[dict]:
+    result = []
+    for candidate in entry.get("candidates") or []:
+        if not isinstance(candidate, dict):
+            continue
+        cleaned = dict(candidate)
+        cleaned["true_from"] = _published_true_from(candidate)
+        result.append(cleaned)
+    return result
+
+
+def _restore_stage3_dossier(item: dict, state: State) -> dict | None:
+    dossier_id = item.get("id")
+    domain = item.get("domain")
+    outcome = item.get("state")
+    if not isinstance(dossier_id, str) or not isinstance(domain, str):
+        return None
+    if outcome not in ("ready", "failed"):
+        return None
+    fields = item.get("fields")
+    if not isinstance(fields, dict) or set(fields) != set(ALL_FIELDS):
+        return None
+    builds = item.get("builds")
+    history = item.get("history")
+    gathered = item.get("gathered")
+    if not isinstance(builds, list) or not isinstance(history, dict):
+        return None
+    if not isinstance(gathered, dict):
+        gathered = {}
+    spent = item.get("spent_units")
+    researched_at = item.get("researched_at")
+    if not isinstance(spent, int) or spent < 0:
+        return None
+    if researched_at is not None and not isinstance(researched_at, str):
+        return None
+    clean_history = {}
+    for field in ALL_FIELDS:
+        entries = history.get(field)
+        if not isinstance(entries, list):
+            entries = []
+        clean_history[field] = copy.deepcopy(entries)
+    return {
+        "id": dossier_id,
+        "domain": domain,
+        "state": outcome,
+        "last_outcome": item.get("last_outcome") or outcome,
+        "fields": copy.deepcopy(fields),
+        "researched_at": researched_at,
+        "spent_units": spent,
+        "base_spent": spent,
+        "build_spent": 0,
+        "building": False,
+        "build_gen": 0,
+        "builds": copy.deepcopy(builds),
+        "history": clean_history,
+        "gathered": dict(gathered),
+        "has_ready": bool(item.get("has_ready")),
+    }
+
+
+def _import_legacy_dossier(item: dict, state: State) -> dict | None:
+    dossier_id = item.get("id")
+    domain = item.get("domain")
+    outcome = item.get("state")
+    if not isinstance(dossier_id, str) or not isinstance(domain, str):
+        return None
+    if outcome not in ("ready", "failed"):
+        return None
+    fields = item.get("fields")
+    if not isinstance(fields, dict) or not set(FIELDS).issubset(set(fields)):
+        return None
+    if not all(_valid_field_entry(fields[field]) for field in FIELDS):
+        return None
+    spent = item.get("spent_units")
+    researched_at = item.get("researched_at")
+    if not isinstance(spent, int) or spent < 0:
+        return None
+    if researched_at is not None and not isinstance(researched_at, str):
+        return None
+
+    is_stage2 = any("candidates" in (fields[field] or {}) for field in FIELDS)
+    dossier = _new_dossier(dossier_id, domain)
+    dossier["state"] = outcome
+    dossier["last_outcome"] = outcome
+    dossier["researched_at"] = researched_at
+    dossier["spent_units"] = spent
+    dossier["base_spent"] = spent
+
+    assembled: dict[str, dict] = {}
+    for field in FIELDS:
+        entry = fields[field] or {}
+        if is_stage2 and isinstance(entry.get("candidates"), list):
+            candidates = _legacy_stage2_candidates(entry)
+            rebuilt = rebuild_field_from_candidates(entry.get("value"), candidates, researched_at)
+            for candidate in rebuilt["candidates"]:
+                candidate["learned_at"] = researched_at
+                if candidate.get("true_from") is None:
+                    candidate["true_from"] = _published_true_from(candidate)
+            rebuilt["true_from"] = (
+                rebuilt["candidates"][0].get("true_from") if rebuilt["candidates"] else None
+            )
+        else:
+            rebuilt = imported_field(entry.get("value"), entry.get("citations") or [], researched_at)
+        if rebuilt.get("value") is not None:
+            rebuilt["learned_at"] = researched_at
+        else:
+            rebuilt["true_from"] = None
+            rebuilt["learned_at"] = None
+        assembled[field] = rebuilt
+    assembled["executives"] = empty_field()
+    dossier["fields"] = assembled
+
+    for field in ALL_FIELDS:
+        for candidate in assembled[field].get("candidates") or []:
+            key = candidate_identity(field, candidate)
+            dossier["gathered"][key] = candidate.get("learned_at") or researched_at
+
+    for field in FIELDS:
+        entry = assembled[field]
+        if entry.get("value") is not None:
+            dossier["history"][field].append(
+                {
+                    "type": "initial",
+                    "value": copy.deepcopy(entry.get("value")),
+                    "true_from": entry.get("true_from"),
+                    "learned_at": researched_at,
+                    "citations": copy.deepcopy(entry.get("citations") or []),
+                }
+            )
+
+    if researched_at is not None:
+        versions: dict[str, dict] = {}
+        for field in FIELDS:
+            for candidate in assembled[field].get("candidates") or []:
+                url = candidate.get("url") or ""
+                version = versions.setdefault(
+                    url,
+                    {
+                        "url": url,
+                        "true_from": candidate.get("true_from"),
+                        "candidates": [],
+                    },
+                )
+                version["candidates"].append(
+                    {
+                        "field": field,
+                        "title": None,
+                        "value": candidate.get("value"),
+                        "url": url,
+                        "excerpt": candidate.get("excerpt") or "",
+                        "provider": candidate.get("provider") or "",
+                        "kind": candidate.get("kind"),
+                        "published_at": candidate.get("published_at"),
+                        "true_from": candidate.get("true_from"),
+                        "retrieved_at": candidate.get("retrieved_at"),
+                        "learned_at": candidate.get("learned_at"),
+                    }
+                )
+        dossier["builds"].append(
+            {
+                "seq": state.next_build_seq,
+                "time": researched_at,
+                "outcome": "ready",
+                "spent": spent,
+                "fields": copy.deepcopy(assembled),
+                "versions": list(versions.values()),
+            }
+        )
+        state.next_build_seq += 1
+        dossier["has_ready"] = True
+    return dossier
 
 
 def _state_from_export(payload: object, clock: datetime | None) -> State | None:
@@ -748,45 +1350,20 @@ def _state_from_export(payload: object, clock: datetime | None) -> State | None:
             return None
         state.tokens[token] = user_id
 
+    stage3 = payload.get("stage3") if isinstance(payload.get("stage3"), dict) else None
+
     for item in dossiers:
         if not isinstance(item, dict):
             return None
-        dossier_id = item.get("id")
-        domain = item.get("domain")
-        outcome = item.get("state")
-        if not isinstance(dossier_id, str) or not isinstance(domain, str):
+        if stage3 is not None:
+            dossier = _restore_stage3_dossier(item, state)
+        else:
+            dossier = _import_legacy_dossier(item, state)
+        if dossier is None:
             return None
-        if outcome not in ("ready", "failed"):
+        if dossier["domain"] in state.dossiers:
             return None
-        fields = item.get("fields")
-        if not isinstance(fields, dict) or set(fields) != set(FIELDS):
-            return None
-        if not all(_valid_field_entry(entry) for entry in fields.values()):
-            return None
-        spent = item.get("spent_units")
-        researched_at = item.get("researched_at")
-        if not isinstance(spent, int) or spent < 0:
-            return None
-        if researched_at is not None and not isinstance(researched_at, str):
-            return None
-        if domain in state.dossiers:
-            return None
-        imported_fields = {
-            field: _imported_field(fields[field], researched_at) for field in FIELDS
-        }
-        state.dossiers[domain] = {
-            "id": dossier_id,
-            "domain": domain,
-            "state": outcome,
-            "last_outcome": outcome,
-            "fields": imported_fields,
-            "researched_at": researched_at,
-            "spent_units": spent,
-            "base_spent": spent,
-            "build_spent": 0,
-            "building": False,
-            "build_gen": 0,
-        }
+        state.dossiers[dossier["domain"]] = dossier
 
     for record in idempotency:
         if not isinstance(record, dict):
@@ -811,6 +1388,21 @@ def _state_from_export(payload: object, clock: datetime | None) -> State | None:
         next_dossier = 1
     state.next_user = next_user
     state.next_dossier = next_dossier
+
+    if stage3 is not None:
+        feed = stage3.get("feed")
+        next_seq = stage3.get("next_seq")
+        next_build_seq = stage3.get("next_build_seq")
+        if not isinstance(feed, list):
+            return None
+        state.feed = copy.deepcopy(feed)
+        state.next_seq = next_seq if isinstance(next_seq, int) and next_seq >= 1 else 1
+        state.next_build_seq = (
+            next_build_seq if isinstance(next_build_seq, int) and next_build_seq >= 1 else 1
+        )
+    else:
+        state.feed = []
+        state.next_seq = 1
     return state
 
 
@@ -820,6 +1412,33 @@ def _next_id(prefix: str, current: int, taken: set[str]) -> tuple[str, int]:
         current += 1
         if candidate not in taken:
             return candidate, current
+
+
+# --------------------------------------------------------------------------
+# Boot: restore durable state from the container filesystem.
+
+
+def _restore_from_disk() -> State | None:
+    try:
+        with open(_STATE_FILE, "r", encoding="utf-8") as handle:
+            data = json.load(handle)
+    except (OSError, ValueError):
+        return None
+    if not isinstance(data, dict):
+        return None
+    clock = parse_rfc3339(data.get("clock")) if data.get("clock") else None
+    try:
+        state = _state_from_export(data, clock)
+    except Exception:
+        return None
+    if state is None:
+        return None
+    return state
+
+
+_loaded = _restore_from_disk()
+if _loaded is not None:
+    _STATE = _loaded
 
 
 # --------------------------------------------------------------------------
@@ -854,6 +1473,7 @@ def test_reset():
         return validation_error("invalid fixture")
     with _GLOBAL_LOCK:
         _STATE = new_state
+    persist_state(new_state)
     return empty_response(204)
 
 
@@ -872,15 +1492,15 @@ def test_clock():
     parsed = parse_rfc3339(raw)
     if parsed is None:
         return validation_error("now must be RFC 3339 with an offset")
-    with _GLOBAL_LOCK:
-        state = _STATE
-        with state.lock:
-            current = state.frozen_clock
-            if current is None:
-                current = datetime.now(timezone.utc)
-            if parsed < current:
-                return validation_error("now is earlier than the clock")
-            state.frozen_clock = parsed
+    state = _STATE
+    with state.lock:
+        current = state.frozen_clock
+        if current is None:
+            current = datetime.now(timezone.utc)
+        if parsed < current:
+            return validation_error("now is earlier than the clock")
+        state.frozen_clock = parsed
+    persist_state(state)
     return empty_response(204)
 
 
@@ -888,9 +1508,9 @@ def test_clock():
 def test_export():
     with _GLOBAL_LOCK:
         state = _STATE
-        return json_response(
-            {"track": "dossier", "format_version": 1, "state": _export_state(state)}
-        )
+    return json_response(
+        {"track": "dossier", "format_version": 1, "state": _export_state(state)}
+    )
 
 
 @app.post("/_test/import")
@@ -905,14 +1525,15 @@ def test_import():
         return validation_error("wrong track or format_version")
     if "state" not in body:
         return validation_error("state is required")
+    current = _STATE
+    with current.lock:
+        clock = current.frozen_clock
+    new_state = _state_from_export(body.get("state"), clock)
+    if new_state is None:
+        return validation_error("invalid state")
     with _GLOBAL_LOCK:
-        current = _STATE
-        with current.lock:
-            clock = current.frozen_clock
-        new_state = _state_from_export(body.get("state"), clock)
-        if new_state is None:
-            return validation_error("invalid state")
         _STATE = new_state
+    persist_state(new_state)
     return empty_response(204)
 
 
@@ -949,6 +1570,7 @@ def _create_account(payload: dict):
         }
         state.email_index[email_key] = user_id
         state.tokens[token] = user_id
+    persist_state(state)
     return {"user_id": user_id, "display_name": display_name, "token": token}, 201
 
 
@@ -973,6 +1595,7 @@ def _authenticate(payload: dict):
         state.tokens[token] = user["id"]
         display_name = user["display_name"]
         user_id = user["id"]
+    persist_state(state)
     return {"user_id": user_id, "display_name": display_name, "token": token}, 200
 
 
@@ -1044,24 +1667,13 @@ def create_dossier():
             dossier_id, state.next_dossier = _next_id(
                 "d", state.next_dossier, set(d["id"] for d in state.dossiers.values())
             )
-            dossier = {
-                "id": dossier_id,
-                "domain": domain,
-                "state": "building",
-                "last_outcome": None,
-                "fields": empty_fields(),
-                "researched_at": None,
-                "spent_units": 0,
-                "base_spent": 0,
-                "build_spent": 0,
-                "building": False,
-                "build_gen": 0,
-            }
+            dossier = _new_dossier(dossier_id, domain)
             state.dossiers[domain] = dossier
             start_build(state, dossier, state.now())
             response_body = dossier_brief(dossier)
             status = 202
         state.idem[idem_key] = {"body": canonical, "response": copy.deepcopy(response_body)}
+        persist_state(state)
     return json_response(response_body, status)
 
 
@@ -1072,22 +1684,12 @@ def list_dossiers():
     if user_id is None:
         return unauthenticated()
 
-    raw_limit = request.args.get("limit")
-    raw_offset = request.args.get("offset")
-    if raw_limit is not None:
-        if not _INT_QUERY_RE.match(raw_limit):
-            return validation_error("limit must be plain decimal digits")
-        limit = int(raw_limit)
-        if limit < 1 or limit > 200:
-            return validation_error("limit must be between 1 and 200")
-    else:
-        limit = 50
-    if raw_offset is not None:
-        if not _INT_QUERY_RE.match(raw_offset):
-            return validation_error("offset must be plain decimal digits")
-        offset = int(raw_offset)
-    else:
-        offset = 0
+    limit, error = integer_query("limit", 50, 1, 200)
+    if error is not None:
+        return error
+    offset, error = integer_query("offset", 0, 0, None)
+    if error is not None:
+        return error
     query = request.args.get("q")
 
     with state.lock:
@@ -1185,6 +1787,196 @@ def evidence_screen(domain: str):
     return html_response(evidence_page(data, user=user))
 
 
+@app.get("/dossiers/<path:domain>/history")
+def dossier_history(domain: str):
+    html = wants_html()
+    state = _STATE
+    if html:
+        user = current_user(state)
+        if user is None:
+            return login_redirect()
+    else:
+        if auth_user(state) is None:
+            return unauthenticated()
+    try:
+        normalised = normalise_domain(domain)
+    except ValueError:
+        if html:
+            return html_response(message_page("Invalid domain", "That domain is not valid.", user=user), 422)
+        return validation_error("invalid domain")
+    with state.lock:
+        dossier = state.dossiers.get(normalised)
+        if dossier is None:
+            if html:
+                return html_response(dossier_page(None, normalised, user=user, not_found=True))
+            return not_found("no such dossier")
+        history = copy.deepcopy(dossier.get("history", {}))
+        domain_name = dossier["domain"]
+    if html:
+        return html_response(history_page(domain_name, history, user=user))
+    fields = {field: history.get(field, []) for field in ALL_FIELDS}
+    return json_response({"domain": normalised, "fields": fields})
+
+
+def _as_of_response(state: State, dossier: dict, as_of: datetime) -> Response:
+    ready = _builds_at(dossier, as_of, ready_only=True)
+    if not ready:
+        return not_found("no ready build at or before as_of")
+    chosen = max(ready, key=lambda b: (_build_time(b), b.get("seq", 0)))
+    spent = sum(
+        b.get("spent", 0)
+        for b in dossier.get("builds", [])
+        if _build_time(b) is not None and _build_time(b) <= as_of
+    )
+    payload = {
+        "dossier_id": dossier["id"],
+        "domain": dossier["domain"],
+        "state": "ready",
+        "researched_at": chosen.get("time"),
+        "spent_units": spent,
+        "fields": copy.deepcopy(chosen.get("fields") or empty_fields()),
+    }
+    return json_response(payload)
+
+
+def _versions_by_url(versions_in_order: list[dict]) -> dict[str, list[dict]]:
+    grouped: dict[str, list[dict]] = {}
+    for version in versions_in_order:
+        url = version.get("url") or ""
+        grouped.setdefault(url, []).append(version)
+    return grouped
+
+
+def _version_at(versions: list[dict], true_at: str) -> dict | None:
+    """The version of one URL whose evidence holds on ``true_at``.
+
+    Versions are in build order.  A version with a null ``true_from`` holds
+    from no date and replaces every earlier version; a version dated after
+    ``true_at`` does not affect that date.  The last version that does affect
+    it therefore decides what holds.
+    """
+    chosen: dict | None = None
+    for version in versions:
+        stamp = version.get("true_from")
+        if stamp is None:
+            chosen = version
+        elif isinstance(stamp, str) and stamp <= true_at:
+            chosen = version
+    if chosen is None or chosen.get("true_from") is None:
+        return None
+    return chosen
+
+
+def _values_response(state: State, dossier: dict, true_at: str, as_of: datetime, as_of_text: str) -> Response:
+    builds = _builds_at(dossier, as_of, ready_only=True)
+    if not builds:
+        return not_found("no ready build at or before as_of")
+    versions_in_order: list[dict] = []
+    for build in builds:
+        for version in build.get("versions") or []:
+            versions_in_order.append(version)
+    grouped = _versions_by_url(versions_in_order)
+
+    active_candidates: dict[str, list[dict]] = {field: [] for field in ALL_FIELDS}
+    for url, versions in grouped.items():
+        version = _version_at(versions, true_at)
+        if version is None:
+            continue
+        for candidate in version.get("candidates") or []:
+            field = candidate.get("field")
+            if field in active_candidates:
+                active_candidates[field].append(candidate)
+
+    fields: dict[str, dict] = {}
+    for field in FIELDS:
+        assembled = assemble_field(active_candidates[field])
+        fields[field] = {
+            "value": assembled["value"],
+            "true_from": assembled["true_from"],
+            "citations": assembled["citations"],
+        }
+    execs = assemble_executives(active_candidates["executives"])
+    fields["executives"] = {
+        "value": execs["value"],
+        "true_from": execs["true_from"],
+        "citations": execs["citations"],
+    }
+    return json_response(
+        {
+            "domain": dossier["domain"],
+            "true_at": true_at,
+            "as_of": as_of_text,
+            "fields": fields,
+        }
+    )
+
+
+@app.get("/dossiers/<path:domain>/values")
+def dossier_values(domain: str):
+    state = _STATE
+    user_id = auth_user(state)
+    if user_id is None:
+        return unauthenticated()
+    try:
+        normalised = normalise_domain(domain)
+    except ValueError:
+        return validation_error("invalid domain")
+    raw_true_at = request.args.get("true_at")
+    true_at = parse_date_only(raw_true_at)
+    if true_at is None:
+        return validation_error("true_at must be a YYYY-MM-DD date")
+    raw_as_of = request.args.get("as_of")
+    if raw_as_of is None:
+        as_of_value = state.now()
+        as_of_text = now_iso(as_of_value)
+    else:
+        as_of_value = parse_rfc3339(raw_as_of)
+        if as_of_value is None:
+            return validation_error("as_of must be RFC 3339 with an offset")
+        as_of_text = now_iso(as_of_value)
+    with state.lock:
+        dossier = state.dossiers.get(normalised)
+        if dossier is None:
+            return not_found("no such dossier")
+        snapshot = copy.deepcopy(dossier)
+    return _values_response(state, snapshot, true_at, as_of_value, as_of_text)
+
+
+@app.get("/changes")
+def changes_feed():
+    state = _STATE
+    user_id = auth_user(state)
+    if user_id is None:
+        return unauthenticated()
+    since, error = integer_query("since", 0, 0, None)
+    if error is not None:
+        return error
+    limit, error = integer_query("limit", 50, 1, 200)
+    if error is not None:
+        return error
+    with state.lock:
+        entries = [copy.deepcopy(e) for e in state.feed if e.get("seq", 0) > since]
+    entries.sort(key=lambda e: e.get("seq", 0))
+    window = entries[:limit]
+    payload = {
+        "changes": [
+            {
+                "seq": entry.get("seq"),
+                "domain": entry.get("domain"),
+                "field": entry.get("field"),
+                "type": entry.get("type"),
+                "from": entry.get("from"),
+                "to": entry.get("to"),
+                "true_from": entry.get("true_from"),
+                "learned_at": entry.get("learned_at"),
+            }
+            for entry in window
+        ],
+        "has_more": len(entries) > len(window),
+    }
+    return json_response(payload)
+
+
 @app.get("/dossiers/<path:domain>")
 def get_dossier(domain: str):
     html = wants_html()
@@ -1198,13 +1990,22 @@ def get_dossier(domain: str):
         normalised = normalise_domain(domain)
     except ValueError:
         return validation_error("invalid domain")
+    raw_as_of = request.args.get("as_of")
+    as_of = None
+    if raw_as_of is not None:
+        as_of = parse_rfc3339(raw_as_of)
+        if as_of is None:
+            return validation_error("as_of must be RFC 3339 with an offset")
     with state.lock:
         dossier = state.dossiers.get(normalised)
         if dossier is None:
             if html:
                 return html_response(dossier_page(None, normalised, user=user, not_found=True))
             return not_found("no such dossier")
+        snapshot = copy.deepcopy(dossier)
         data = dossier_view(dossier)
+    if as_of is not None:
+        return _as_of_response(state, snapshot, as_of)
     if html:
         return html_response(dossier_page(data, normalised, user=user))
     return json_response(data)
@@ -1241,6 +2042,7 @@ def refresh_dossier(domain: str):
             start_build(state, dossier, state.now())
         response_body = dossier_brief(dossier)
         state.idem[idem_key] = {"body": canonical, "response": copy.deepcopy(response_body)}
+        persist_state(state)
     return json_response(response_body, 202)
 
 
@@ -1331,6 +2133,7 @@ def logout_screen():
     if token:
         with state.lock:
             state.tokens.pop(token, None)
+        persist_state(state)
     response = redirect("/login", code=303)
     response.delete_cookie(SESSION_COOKIE, path="/")
     return response

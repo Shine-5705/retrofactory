@@ -1,14 +1,16 @@
-"""Page header lines: kind, publication time and prose.
+"""Page header lines: kind, publication time, effective date and prose.
 
-Stage 2 defines a page's text as the text a browser shows once the page has
-loaded.  A text may begin with header lines of the form ``Name: value`` and the
-header ends at the first empty line; everything after it is prose.
+A page's text is the text a browser shows once the page has loaded.  A text may
+begin with header lines of the form ``Name: value`` and the header ends at the
+first empty line; everything after it is prose.  ``Effective: <YYYY-MM-DD>``
+states the date from which the page's evidence holds; a page without a valid
+``Effective`` line takes the date part, in UTC, of its ``Published`` time.
 """
 
 from __future__ import annotations
 
 import re
-from datetime import datetime
+from datetime import datetime, timezone
 
 from dossier_support import split_prose
 
@@ -18,6 +20,7 @@ _HEADER_NAME_RE = re.compile(r"^[A-Z][a-z]+(?:-[A-Z][a-z]+)*$")
 _RFC3339_RE = re.compile(
     r"^(\d{4})-(\d{2})-(\d{2})[Tt](\d{2}):(\d{2}):(\d{2})(\.\d+)?([Zz]|[+-]\d{2}:\d{2})$"
 )
+_DATE_RE = re.compile(r"^(\d{4})-(\d{2})-(\d{2})$")
 
 
 def is_header_line(line: str) -> bool:
@@ -68,6 +71,20 @@ def parse_published(value: str | None) -> datetime | None:
     return parsed
 
 
+def parse_effective_date(value: str | None) -> str | None:
+    """A valid ``Effective`` header line carries a bare ``YYYY-MM-DD`` date."""
+    if not value:
+        return None
+    text = value.strip()
+    if not _DATE_RE.match(text):
+        return None
+    try:
+        parsed = datetime.strptime(text, "%Y-%m-%d")
+    except ValueError:
+        return None
+    return parsed.date().isoformat()
+
+
 def _host_matches(url: str, domain: str) -> bool:
     try:
         from urllib.parse import urlsplit
@@ -96,10 +113,36 @@ def page_published(headers: dict[str, str]) -> datetime | None:
     return parse_published(headers.get("published"))
 
 
-def parse_page(text: str, url: str, domain: str) -> tuple[str, datetime | None, str]:
-    """Return ``(kind, published_at, prose)`` for one page text."""
+def published_utc_date(published: datetime | None) -> str | None:
+    if published is None:
+        return None
+    return published.astimezone(timezone.utc).date().isoformat()
+
+
+def page_true_from(headers: dict[str, str], published: datetime | None) -> str | None:
+    effective = parse_effective_date(headers.get("effective"))
+    if effective is not None:
+        return effective
+    return published_utc_date(published)
+
+
+def parse_page_details(text: str, url: str, domain: str) -> dict:
+    """Return page properties: kind, publication time, true_from and prose."""
     headers = parse_headers(text)
-    return page_kind(url, headers, domain), page_published(headers), split_prose(text)
+    published = page_published(headers)
+    return {
+        "kind": page_kind(url, headers, domain),
+        "published": published,
+        "published_at": published.isoformat() if published is not None else None,
+        "true_from": page_true_from(headers, published),
+        "prose": split_prose(text),
+    }
+
+
+def parse_page(text: str, url: str, domain: str) -> tuple[str, datetime | None, str]:
+    """Backwards-compatible ``(kind, published_at, prose)`` for one page text."""
+    details = parse_page_details(text, url, domain)
+    return details["kind"], details["published"], details["prose"]
 
 
 def published_iso(published: datetime | None) -> str | None:
