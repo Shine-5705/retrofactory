@@ -113,8 +113,20 @@ Times are UTC. Where a figure was not stated in a room message, it is marked
 - Review rounds: 1 (REJECT). Ledger: added stage-4 REJECT entries; promoted the
   collapse/lose-evidence root cause to Standing rules (second occurrence, first
   be11ee3). New S4-51 root cause (new field omitted from one render path) recorded.
+- Implementer fix revision f000d83bcb8e4627ce59b5ae7a763dde0f1bcdaa (b51897c not
+  amended): all 5 original findings fixed; implementer reported harness + 10/10
+  probes pass.
+- Review verdict: REJECT of f000d83 (measured: reviewer message this turn). Basis:
+  clean detached worktree, harness stages 1/2/3/4 pass, 10/10 probes pass. Original
+  5 findings confirmed fixed. NEW FAIL S4-28 regression: member `corroborated`
+  computed from standing origins instead of current-candidate origins (server.py:937),
+  false at p3 t3 where Ana has one current origin. Also: reported tree was dirty
+  (uncommitted fix of that line); handoff claimed clean.
+- Review rounds: 2 (both REJECT). Ledger: added f000d83 REJECT entry; root cause
+  (sibling field using wrong evidence basis) is a first occurrence, not promoted.
+  Standing rules still the single collapsed-evidence rule.
 - Open risk (reviewer): no live Nimble credentials; provider 429/5xx/all-fail
-  exercised with an independent mock only.
+  exercised with reviewer mock only.
 - Spend: STAGE 4 not reported (no seat reported figures).
 - Unit remains open; close it here on the final ACCEPT and forward the frozen
   revision's figures.

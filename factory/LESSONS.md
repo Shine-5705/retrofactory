@@ -340,6 +340,28 @@ causes shared across a fix and another symptom are listed once.
     the render order from one shared definition or assert full coverage in a test,
     so a new member cannot be silently dropped from one screen.
 
+- 2026-11-17 (Stage 4, revision f000d83): sibling field computed from the wrong
+  evidence set (S4-28 regression).
+  - Symptom: at p3 t3, member-field `corroborated` was reported true although cfo
+    Ana Silva had only one current origin (`alpha.test`); the reviewer had passed
+    S4-28 on the earlier b51897c. Expected false, because `corroborated` is based
+    on CURRENT candidates' origins (stage-2 candidates = last ready build), while
+    only `corroborated_since` is based on STANDING origins over time.
+  - Root cause: server.py:937 computed member `corroborated` from the `standing`
+    origin set (introduced to fix `corroborated_since` in b51897c) instead of the
+    `current` origin set, reusing one accumulated set across two sibling fields
+    that have deliberately different bases.
+  - Generic rule: when two related outputs differ only by the basis they aggregate
+    over (current snapshot vs accumulated history), keep the two sets distinct and
+    bind each explicitly to its output; never reuse the more convenient set for
+    both. Guard the fix of one field against regressions in its sibling with a
+    test covering a case where the two bases disagree (here: a member whose
+    current origins shrank to one while standing origins stayed >=2).
+  - Process note: the reported revision's tree was not clean (uncommitted diff
+    server.py:937 `standing.values()` -> `current.values()` that fixes S4-28). A
+    handoff must name a committed revision with a clean tree; commit the correction
+    before re-review.
+
 ## Standing rules
 
 - Retain every distinct evidence item; never collapse items onto a single stored
