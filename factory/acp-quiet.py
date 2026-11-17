@@ -21,7 +21,7 @@ list rotates; a model that failed is retried after ACP_QUIET_COOLDOWN seconds.
 
 Every decision is logged as one JSON line to $ACP_QUIET_LOG_DIR/<seat>-<pid>.jsonl.
 """
-import json, os, re, subprocess, sys, threading, time
+import json, os, re, shutil, subprocess, sys, threading, time
 
 MAX_ACK_CHARS = int(os.environ.get("ACP_QUIET_MAX_CHARS", "280"))
 ACK_PATTERNS = [
@@ -238,6 +238,11 @@ def main() -> int:
                     if c.get("type") == "text":
                         texts[sid] += c.get("text", "")
                     return
+            if isinstance(msg, dict) and msg.get("id") in injected and "method" not in msg and msg.get("id") not in retrying:
+                sid = pending.pop(msg["id"], None); prompts.pop(msg["id"], None); injected.discard(msg["id"])
+                text = texts.pop(sid, ""); held.pop(sid, None)
+                note(event="inject_done", session=sid, chars=len(text), text=text[:2000], result=str(msg.get("result") or msg.get("error"))[:200])
+                return
             if isinstance(msg, dict) and isinstance(msg.get("id"), int) and msg["id"] >= 10**9 and "method" not in msg:
                 return   # responses to the proxy's own set_model/cancel requests
             if isinstance(msg, dict) and "id" in msg and msg.get("id") in retrying and "method" not in msg:
@@ -310,7 +315,44 @@ def main() -> int:
                     last_fo[key] = time.time()
                     threading.Thread(target=failover, args=(rid, sid, line), daemon=True).start()
 
+    injected = set()
+
+    def watch_inject():
+        """Operator re-delivery: if <log-dir>/inject-<seat>.json names a room message
+        ({"room": ..., "message_id": ...}) that the seat lost (for example a turn cancelled
+        by an interrupt marks it processed), give the agent that whole numbered message as a
+        prompt. Nothing is posted by the proxy; the agent's closing text is logged, not sent."""
+        path = os.path.join(logdir, f"inject-{seat}.json")
+        while child.poll() is None:
+            time.sleep(2)
+            if not os.path.exists(path) or not current:
+                continue
+            try:
+                req = json.load(open(path)); os.remove(path)
+                sid = list(current)[-1]
+                band = shutil.which("band") or "/usr/bin/band"
+                d = json.loads(subprocess.run([band, "room", "messages", req["room"], "--json", "--type", "text"],
+                                              capture_output=True, text=True, timeout=60).stdout)
+                m = next(x for x in d.get("messages", []) if x.get("id") == req["message_id"])
+                sender = req.get("sender") or ("guptashine5002/" + m.get("sender_name", ""))
+                text = (f"[INCOMING BAND MESSAGE]\nFrom: {sender} (Agent)\nRoom: {req['room']}\nMessage: {m['id']}\n\n"
+                        "Re-delivered by the operator: an earlier delivery of this message was cancelled before you saw it. "
+                        "Your closing text for this turn is not posted anywhere, so send anything others need with the "
+                        "tools your mandate names.\n\nContent:\n" + (m.get("content") or ""))
+                own_id[0] += 1; rid = own_id[0]
+                msg = {"jsonrpc": "2.0", "id": rid, "method": "session/prompt",
+                       "params": {"sessionId": sid, "prompt": [{"type": "text", "text": text}]}}
+                r = assemble(msg, sid)
+                held[sid] = []; texts[sid] = ""
+                raw = (json.dumps(msg) + "\n").encode()
+                injected.add(rid); pending[rid] = sid; prompts[rid] = raw
+                note(event="inject", session=sid, message=m["id"], assembled=r)
+                child.stdin.write(raw); child.stdin.flush()
+            except Exception as e:
+                note(event="inject_error", err=repr(e)[:300])
+
     threading.Thread(target=watch_agent_log, daemon=True).start()
+    threading.Thread(target=watch_inject, daemon=True).start()
     a = threading.Thread(target=client_to_agent, daemon=True); a.start()
     b = threading.Thread(target=agent_to_client, daemon=True); b.start()
     rc = child.wait(); b.join(timeout=5)
