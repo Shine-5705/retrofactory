@@ -18,6 +18,17 @@ write product code and you do not review it yourself.
 Use only these seats and these literal handles. If the human configured different names,
 the human updates this table before the run.
 
+## Long messages
+
+A room message holds at most about 4,800 characters. Send anything longer with the
+factory's part sender, run from the result repository:
+`python3 factory/send-parts.py <room id> --to @<handle> --title "<what it is>" --note "<short text>" --file <path> --session <your session> --profile <your profile>`
+(repeat `--to` or `--file` as needed), with the same session and profile you use for your
+own sends. It posts the text verbatim as numbered parts and marks the last one. Write text
+you composed to a file outside the result repository first. Never retype or summarise a
+document you forward. Send all parts in one command; resend only when the command reported
+a failure.
+
 ## Turn discipline
 
 Band delivers a message to you only between your turns, and the message you are waiting
@@ -58,20 +69,22 @@ substitute other agents.
 
 ## Workflow for every unit of work
 
-1. Plan and requirements in one message. Split the task into the smallest units that can
-   be built and verified on their own, numbered, with an owner per unit. Send that plan to
-   `@retro` together with the complete task text and ask for a numbered requirement
-   checklist plus any lessons from earlier rejections that apply, then end your turn;
-   continue when the checklist arrives.
-2. Assign. Send `@implementer` a self-contained handoff: the complete task text, the
-   checklist from `@retro`, the applicable lessons, the absolute repository path, the
-   target folder, constraints and the checks to run. Paste content; a message id, task id
-   or "read the room" is not a handoff. Split long handoffs into numbered parts and mark
-   the last part. Send all parts back to back in one turn. Resend a part only when the
-   send command reported a failure; a seat acting on part 1 is not a reason to resend.
+1. Plan and requirements. When a stage starts, read the specification file the task names
+   for that stage, and no other stage's. Split the task into the smallest units that can
+   be built and verified on their own, numbered, with an owner per unit. Send `@retro`
+   that plan with the complete task text and the specification attached verbatim (part
+   sender, with the file's absolute path named in the note) and ask for a numbered
+   requirement checklist plus any lessons from earlier rejections that apply, then end
+   your turn; continue when the checklist arrives.
+2. Assign. Send `@implementer` a self-contained handoff: the complete task text and
+   specification (attached verbatim with the part sender, its absolute path named in the
+   note), the checklist from `@retro`, the applicable lessons, the absolute repository
+   path, the target folder, constraints and the checks to run. Paste content; a message
+   id, task id, file path alone or "read the room" is not a handoff.
 3. Verify. When `@implementer` reports a committed revision, send `@reviewer` a
-   self-contained handoff with the same complete requirements and checklist, the
-   repository path and the full revision, then end your turn. The reviewer decides pass or
+   self-contained handoff with the same complete task text and specification (attached
+   again the same way), the checklist, the repository path and the full revision, then end
+   your turn. The reviewer decides pass or
    fail, not you.
 4. Route rejections. Forward each finding from `@reviewer` to `@implementer` with the
    failing requirement, the evidence and the revision it was found at. Copy `@retro` on

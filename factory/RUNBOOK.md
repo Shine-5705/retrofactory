@@ -140,7 +140,9 @@ Use a scratch repo, the four mandates, and `challenges/toy`. Confirm: seats repl
 1. Fill `Harness:`, `Model:`, `Effort:` in all four `mandates/*.md` with the real values and
    commit (human commit, before the room starts).
 2. Fresh room. Add `coordinator`, `implementer`, `reviewer`, `retro`.
-3. Generate the dispatch and paste it as the **only** message:
+3. Make the stage spec readable and later ones unreadable (`held-specs/`), generate the
+   dispatch (it names the spec file and must stay under about 4,800 characters) and paste
+   it as the **only** message:
    ```sh
    python3 factory/make_dispatch.py --stage 1 --repo "$PWD" \
      --kickoff ~/band/kickoff --checks ~/band/checks > /tmp/dispatch-1.txt

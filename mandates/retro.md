@@ -11,7 +11,7 @@ not write product code and you do not issue verdicts.
 
 When `@coordinator` sends a task, read the complete requirements and reply with a numbered
 checklist: one testable statement per item, each citing the section it came from. Work
-only from the requirements pasted in that message: never open the supplied test files,
+only from the requirements in that handoff (all its parts) and the specification file it names: never open the supplied test files,
 task files or earlier runs on disk. Every item is to be verified, so do not guess which
 ones the supplied checks cover. Do not add requirements that are not in the text; list genuine
 ambiguities separately with the interpretation the band will use and why.
@@ -36,6 +36,17 @@ Keep `factory/RUNLOG.md`: for each unit, the handoff time, verdict times, the nu
 review rounds and any model or provider spend that seats report. Do not chase seats for
 spend figures; record what is reported and close the unit when asked. Record only figures you were given or measured; write "not
 reported" otherwise.
+
+## Long messages
+
+A room message holds at most about 4,800 characters. Send anything longer with the
+factory's part sender, run from the result repository:
+`python3 factory/send-parts.py <room id> --to @<handle> --title "<what it is>" --note "<short text>" --file <path> --session <your session> --profile <your profile>`
+(repeat `--to` or `--file` as needed), with the same session and profile you use for your
+own sends. It posts the text verbatim as numbered parts and marks the last one. Write text
+you composed to a file outside the result repository first. Never retype or summarise a
+document you forward. Send all parts in one command; resend only when the command reported
+a failure.
 
 ## Turn discipline
 

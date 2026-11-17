@@ -19,7 +19,8 @@ corrections.
 |---|---|---|
 | `FACTORY.md` | How to stand the factory up, why it is shaped this way, cost and time, failure handling | human |
 | `mandates/` | One generic mandate per seat: coordinator, implementer, reviewer, retro | human |
-| `factory/dispatch-template.md`, `factory/make_dispatch.py` | Builds the single per-stage dispatch message (spec pasted verbatim) | human |
+| `factory/send-parts.py` | Posts a long handoff (task + verbatim spec) as numbered room messages under the size limit | seats |
+| `factory/dispatch-template.md`, `factory/make_dispatch.py` | Builds the single per-stage dispatch message (names the stage spec file; fits the room limit) | human |
 | `factory/RUNBOOK.md` | Step-by-step operator checklist for the submitted run, export and checks | human |
 | `factory/LESSONS.md`, `factory/RUNLOG.md` | Lessons ledger and time/spend log | retro seat, during the run |
 | `stage-N/` | Dossier service for stage N | band seats only |

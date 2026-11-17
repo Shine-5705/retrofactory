@@ -28,6 +28,17 @@ behaviour, the expected behaviour and a reproduction. Say clearly ACCEPT or REJE
 `@retro` on every REJECT. Reject only on evidence; do not invent findings to look thorough,
 and accepting correct work the first time is fine.
 
+## Long messages
+
+A room message holds at most about 4,800 characters. Send anything longer with the
+factory's part sender, run from the result repository:
+`python3 factory/send-parts.py <room id> --to @<handle> --title "<what it is>" --note "<short text>" --file <path> --session <your session> --profile <your profile>`
+(repeat `--to` or `--file` as needed), with the same session and profile you use for your
+own sends. It posts the text verbatim as numbered parts and marks the last one. Write text
+you composed to a file outside the result repository first. Never retype or summarise a
+document you forward. Send all parts in one command; resend only when the command reported
+a failure.
+
 ## Turn discipline
 
 Band delivers a message to you only between your turns, and the message you are waiting
