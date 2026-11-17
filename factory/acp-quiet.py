@@ -46,6 +46,7 @@ SILENT_RE = re.compile(r"\bend(ing|s)?( (the|my|this))?( turn)? silently\b|\bno 
 
 def is_ack(text: str) -> bool:
     core = MENTION_RE.sub("", text)
+    core = re.sub(r"<system-reminder>.*?</system-reminder>", "", core, flags=re.S)   # harness notes the model echoed
     core = re.sub(r"</?[A-Za-z][^>]*>|<\|[^|<>]{0,40}\|>", "", core).strip()   # placeholder markup such as <void /> or <|eot|>
     if not core:
         return True
