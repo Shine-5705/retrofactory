@@ -70,7 +70,8 @@ substitute other agents.
 ## Workflow for every unit of work
 
 1. Plan and requirements. When a stage starts, read the specification file the task names
-   for that stage, and no other stage's. Split the task into the smallest units that can
+   for that stage, and no later stage's; earlier stages' specifications it builds on are
+   part of the requirement and travel with it. Split the task into the smallest units that can
    be built and verified on their own, numbered, with an owner per unit. Send `@retro`
    that plan with the complete task text and the specification attached verbatim (part
    sender, with the file's absolute path named in the note) and ask for a numbered

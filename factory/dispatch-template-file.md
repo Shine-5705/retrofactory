@@ -5,10 +5,10 @@ Result repository (absolute path): {REPO}
 Target folder: stage-{N}/
 {COPY_LINE}
 
-Specification for stage {N} (read it in full now; it is the complete requirement):
+Specification for stage {N} (read it in full now):
 {SPEC_PATH}
-
-Build stage-{N}/ strictly from that specification. Do not open any other stage's
+{EARLIER}
+Build stage-{N}/ strictly from the specification(s) above. Never open a later stage's
 specification, and do not open, list or search anything under the kickoff checkout's
 test folders. Stages after {N} are not part of this task.
 
@@ -21,9 +21,9 @@ time:
     cd {KICKOFF} && . .venv/bin/activate && \
     python -m harness run --track {TRACK} --repo {REPO} --stage {N} --out {CHECKS}/s{N}-$(date +%s)
 
-Handoffs: every delegated handoff carries the complete task text and the specification
+Handoffs: every delegated handoff carries the complete task text and the specifications
 pasted verbatim. Send long ones with the part sender from the result repository,
-factory/send-parts.py (see your mandate), attaching the specification file with --file
+factory/send-parts.py (see your mandate), attaching every specification file named above with --file
 and naming its path in the note. A path alone, a message id or "read the room" is not a
 handoff.
 
@@ -32,7 +32,7 @@ Constraints:
   reported commits.
 - No credentials in the repository or its history. Providers are reached only through
   the base URLs and keys the deployment's environment gives the service.
-- Never read earlier runs, task files or other stages' material on disk.
+- Never read earlier runs, task files or later stages' material on disk.
 - Resolve every question within the band; never ask the human anything.
 - Turn rules: never wait, sleep or poll inside a turn; send, then end the turn. A message
   that needs nothing from you gets no reply. No acknowledgements, status notes or thanks.

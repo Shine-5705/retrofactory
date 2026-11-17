@@ -19,7 +19,7 @@ carry them.
   your handoff and use their pass/fail output. Supplied checks are a partial sample;
   behaviour they do not exercise still counts. Never special-case a test input.
 - Do not read anything outside the result repository except what your handoff names.
-  Task files, other stages' requirements and earlier runs you may find on disk are not
+  Task files, later stages' requirements and earlier runs you may find on disk are not
   inputs.
 - Before you hand off, build the deliverable the way a stranger would from its run
   instructions in a clean environment, run every supplied check, and run your own probes

@@ -27,13 +27,16 @@ def main() -> None:
     a = ap.parse_args()
     spec_path = pathlib.Path(a.kickoff, "challenges", a.track, "spec", f"stage-{a.stage}.md")
     spec = spec_path.read_text() if a.paste else ""
+    prev = [spec_path.with_name(f"stage-{k}.md") for k in range(1, a.stage)]
+    earlier = ("It extends the earlier stage specification(s) below, which still apply where it\n"
+               "refers to them and are part of this requirement:\n" + "\n".join(map(str, prev)) + "\n") if prev else ""
     copy_line = ("Build in stage-1/. It may already hold starter files; use or replace them." if a.stage == 1 else
                  f"First copy the frozen stage-{a.stage - 1}/ folder to stage-{a.stage}/ and extend "
                  f"the copy. stage-{a.stage - 1}/ stays unchanged.")
     text = (HERE / ("dispatch-template.md" if a.paste else "dispatch-template-file.md")).read_text()
     for k, v in {"{N}": str(a.stage), "{REPO}": a.repo, "{KICKOFF}": a.kickoff,
                  "{CHECKS}": a.checks, "{TRACK}": a.track, "{COPY_LINE}": copy_line, "{SPEC}": spec,
-                 "{SPEC_PATH}": str(spec_path)}.items():
+                 "{SPEC_PATH}": str(spec_path), "{EARLIER}": earlier}.items():
         text = text.replace(k, v)
     if not a.paste and len(text) > 4800:
         raise SystemExit(f"dispatch is {len(text)} characters; the room limit is about 4,800")
