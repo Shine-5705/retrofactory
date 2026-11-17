@@ -1,0 +1,1 @@
+Stage 4 frozen at revision cd6208cc44ac7e2ee34cf9c4c25c698f574cc02d on reviewer ACCEPT (all S4-1..S4-85 + A1..A6 PASS; stage-4 folder unchanged from that revision). Open risk: no live Nimble credentials; provider 429/5xx/all-fail verified with mock only. Time/spend: not reported by any seat.
