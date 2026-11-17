@@ -272,3 +272,36 @@ Derived from /workspace/band/ref/sf-buildathon-2026/challenges/dossier/spec/stag
 207. `founded_year`: number as integer. (§A.5)
 208. `headcount_range`: range of §4 that contains the number. (§A.5)
 209. `funding_total`: number times scale in US dollars (k/thousand=1,000; m/mn/million=1,000,000; bn/billion=1,000,000,000); non-whole-dollar amounts not values. (§A.5)
+
+---
+
+# Lessons ledger
+
+Reusable lessons from rejections and failed checks. Each entry: date, revision,
+symptom, root cause, and a generic rule that would have prevented it, written to
+help a team building a different product. First occurrence of a root cause is
+listed here; the second occurrence is promoted to "Standing rules" below. Root
+causes shared across a fix and another symptom are listed once.
+
+## Entries
+
+- 2026-11-17 (Stage 2, revision be11ee3): global value-level deduplication of candidates drops per-source evidence.
+  - Symptom: when two different pages each support the same value for a field, only
+    the first page yields a candidate; the second page's url/excerpt/provider are
+    dropped, so the selected field's citations omit a supporting page. Observed:
+    two pages each supporting legal_name "Acme Ltd" produced 1 candidate and 1
+    citation, expected 2. Reviewer probe `reviewer_logic_probe2.py` and full-build
+    `reviewer_fake_router_probe.py` CASE A.
+  - Root cause: `selection.candidates_from_pages` deduplicates globally by value
+    alone (`key = _json_key(value); if key in seen[field]: continue`,
+    selection.py:131-134), conflating "same value" with "same evidence item".
+  - Generic rule: when a requirement defines an evidence item by a tuple of
+    attributes (here value + source page + excerpt + provider), deduplicate on the
+    full identity of that item, never on a single projected attribute such as the
+    value. Group by value only for downstream selection/aggregation, after all
+    distinct supporting evidence items have been retained; a "one per X" rule
+    means one per X, not one per deduplicated value.
+
+## Standing rules
+
+(none yet; promote a rule here when its root cause recurs.)
