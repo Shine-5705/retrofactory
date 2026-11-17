@@ -1,8 +1,10 @@
 # FACTORY.md — RetroFactory
 
-> Draft written before the submitted run. Sections marked **[from the run]** must be filled
-> with measured values from `room.json`, `factory/RUNLOG.md` and Git history after the run.
-> Nothing in those sections may be estimated.
+> Every number below is measured from `room.json`, Git, `factory/RUNLOG.md` (written by the
+> retro seat), OpenCode's local usage database for the seats' sessions, or the seat proxy's
+> logs. Nothing is estimated. The run reached stage 4 (accepted at `cd6208c`, frozen `15f62c9`).
+> A stage-by-stage timeline is in `factory/TIMELINE.md`; every operator action outside the room
+> is in §8; differences between the mandates' `Model:` lines and the models actually run are in §10.
 
 ## 1. Seats
 
@@ -80,17 +82,58 @@ task and spec verbatim, as numbered parts sent by `factory/send-parts.py`. No hu
 5. Create one fresh room, add the four seats, then paste the stage-1 dispatch.
 6. Follow `factory/RUNBOOK.md` for checks, export and the live artifact.
 
-## 5. What we tried that failed **[from the run]**
+## 5. What we tried that failed
 
-_To be written from rehearsal and submitted-run evidence._
+Measured in the practice runs and the submitted run:
 
-## 6. Measured delivery time and model spend **[from the run]**
+- **Acknowledgement loops.** Band's OpenCode runtime posts a seat's end-of-turn text as a
+  reply, which wakes the sender. Free models rarely end a turn on empty text: in one
+  practice run 191 of 221 room messages were bare acknowledgements. Mandate rules alone did
+  not stop it; the seat proxy (§3.6) does, but some shapes still slipped through (§9).
+- **Some free models cannot end a turn without a tool call.** big-pickle and nemotron loop
+  on `true`: the stage-2 implementer made 135 such calls in one turn (169 in the stage),
+  the stage-1 retro 71. big-pickle was removed from the implementer's fallbacks after stage 2.
+- **One turn per handoff part.** Handoffs exceed the room's ~5,000-character message cap, so
+  they are sent as verbatim numbered parts. Each part used to cost a full model turn on the
+  receiving seat (26 turns for one stage-3 handoff), which used up free quotas and gave
+  weak models 25 chances to post junk. Since stage 3 the proxy assembles the parts into one
+  prompt.
+- **Free-tier limits.** Limits are per model and recover over time; large prompts are
+  refused first. In stage 3 the implementer's three models and later the reviewer's three
+  models were all limited at once; in stage 4 a 104K-character handoff was refused by three
+  models and accepted by a fourth.
+- **Interrupting a seat can lose its message.** `band runtime interrupt` settles the message
+  of the cancelled turn as processed (stage 4, §8).
 
-| Stage | First seat message | Last seat message | Review rounds | Model spend | Nimble units |
-|---|---|---|---|---|---|
-| 1 | | | | | |
+## 6. Measured delivery time and model spend
+
+Wall time is human dispatch to the coordinator's final report (room timestamps, UTC).
+Model calls and tokens are the seats' OpenCode sessions between that stage's dispatch and
+the next one. All models are OpenCode free-tier models: model spend is **$0.00**
+(OpenCode records cost 0 for every call). Nimble units: **0** during the stages — the
+supplied checks run against the event's simulated web; the one live Nimble call is the
+`dossier-runway.com.json` artifact.
+
+| Stage | Dispatch | Final report | Wall time | Review rounds | Room messages (seat / part messages) | Seat model calls | Input tokens | Output tokens | Reasoning tokens | Cache-read tokens | Model spend |
+|---|---|---|---|---|---|---|---|---|---|---|---|
+| 1 | 10:57:04 | 11:48:16 | 51 min 12 s | 1 (ACCEPT) | 74 (73 / 38) | 343 | 1,058,084 | 68,127 | 172,681 | 24,569,792 | $0.00 |
+| 2 | 12:03:38 | 13:26:23 | 1 h 22 min 45 s | 2 (REJECT, ACCEPT) | 147 (146 / 107) | 677 | 1,929,258 | 115,588 | 142,642 | 44,979,200 | $0.00 |
+| 3 | 13:46:03 | 15:35:01 | 1 h 48 min 58 s | 1 (ACCEPT) | 93 (92 / 77) | 363 | 1,298,303 | 111,999 | 127,623 | 26,008,448 | $0.00 |
+| 4 | 15:49:07 | 18:07:42 | 2 h 18 min 35 s | 3 (REJECT, REJECT, ACCEPT) | 167 (165 / 127; the total also includes 1 operator relay of the implementer's own text, §8) | 595 | 2,263,148 | 163,171 | 75,068 | 61,284,288 | $0.00 |
+
+Event harness, each stage folder built and checked in isolation (shipped checks only):
+`stage-1/` claims stage 1, `stage-2/` claims stage 2, `stage-3/` claims stage 3, `stage-4/` claims stage 4
+(stage-4 run at the accepted revision `cd6208c`: highest contiguous stage 4).
+Seat commits: stage 1 `3dfbf20`; stage 2 `c8f6794`, `b093b62`, `1096230`, `be11ee3`,
+`2cd5de3`; stage 3 `63c7d41`, `437e78b`; stage 4 `d99b58b`, `b51897c`, `f000d83`, `cd6208c`,
+freeze `15f62c9`; retro ledger commits after each stage. Stage-4 calls and tokens are counted from
+dispatch to the final report. The live `dossier-runway.com.json` build (frozen stage 4, run by the
+operator per the participant guide, build finished 18:12:47) spent 78 units by the service's own
+count. Only `funding_total` came back known (the other fields are null: the service's provider
+timeouts are shorter than the live providers need, which `harness check` notes as a warning).
 
 ## 7. How the factory detects, rejects and recovers from bad work
+
 
 - Detect: reviewer's clean build, supplied checks, and probes for every UNTESTED checklist
   item; reviewer also looks for code keyed to test inputs.
@@ -99,4 +142,163 @@ _To be written from rehearsal and submitted-run evidence._
 - Recover: implementer reproduces, fixes the cause, adds a probe, commits anew (no amend);
   `retro` records the root cause and a generic rule; repeated causes become standing rules
   that ride in every later handoff.
-- Real examples **[from the run]**: _link the room message ids and commits here._
+- Real example (stage 2): the implementer reported `be11ee3` with the supplied checks green
+  (stage 1 122/122, stage 2 12/12). The reviewer's own probe of checklist item 25 found that
+  candidates were deduplicated by value alone instead of one per supporting page, and sent
+  REJECT at 13:06:59 UTC with the code location (`selection.py`). The coordinator routed it
+  to the implementer and retro (13:07:23); retro recorded the lesson (`57b9abf`, 13:07:35);
+  the implementer fixed the dedupe key (`2cd5de3`, 13:21:04); the reviewer re-ran and
+  accepted (13:25:57). The supplied checks never caught this; the reviewer's probe did.
+- The same lesson was pasted into the stage-3 and stage-4 handoffs by the coordinator, and
+  the stage-3 reviewer re-verified it.
+- Stage 4: the implementer's own harness run on `b51897c` was green on every stage. The
+  reviewer's ten independent probes found five failing requirements (S4-21/22, S4-29/30
+  `corroborated_since`, S4-51 investors on the history screen) and sent REJECT at 17:44:44 UTC.
+  The fix `f000d83` introduced a regression in S4-28 (member `corroborated` computed from
+  standing origins instead of current candidates); the reviewer rejected it at 18:02:19, the
+  implementer had already corrected it in `cd6208c`, and the reviewer accepted `cd6208c` at
+  18:07:06 after re-running the harness and all ten probes. retro recorded both root causes
+  (`c1e7b51`, `5c67a43`).
+
+## 8. Operator interventions in the submitted run (complete list)
+
+The four stage dispatches are the only messages the human posted in the room. One further room
+message was posted by the operator as the implementer seat: a word-for-word relay of the
+implementer's own closing text that the proxy had held back (16:57:31, below). Outside the
+room, the operator ran the seats' runtime from the command line (Band CLI on the seat
+host). Every such action is listed here with its time. **None of them carried task
+content**: no requirement, hint, code, test output, debugging advice or verdict was given
+to any seat. Seats were restarted, switched between free models, or had a turn cancelled;
+the seat proxy (§3.6) re-shaped how messages reached a seat, and twice re-delivered a lost
+message. Times are UTC on 2026-11-17 (IST = UTC+5:30). Sources: operator monitor notes,
+proxy logs (`acp-quiet/<seat>-<pid>.jsonl`, one `start` line per seat process), Git.
+
+### Before the run
+
+| Time | Action | Why |
+|---|---|---|
+| 10:28:43 | Seat host rebooted (during practice runs, before the submitted room existed). Recovered per `factory/RUNBOOK.md`: reinstalled Band/jamd and Docker, restarted Docker, re-locked held specs, kickoffs and the Nimble key to root-only. | Host restart outside our control. No submitted-run work was in flight. |
+
+### Always on: seat proxy and automatic failover
+
+Each seat's OpenCode process runs behind `factory/acp-quiet.py` (§3.6). It is code, not a
+person, but it changes what Band and the seat see, so it is disclosed here:
+
+- It drops a seat's end-of-turn text only when the whole text is a bare acknowledgement
+  (short, no verdict, revision or code). Dropped texts are logged per seat. Counts:
+  stage 1: 29, stage 2: 67, stage 3: 32.
+- When the free tier reports a usage limit for the seat's model it switches the seat to its
+  next listed model and re-sends the same prompt. Automatic failovers: stage 1: 2,
+  stage 2: 7, stage 3: 14 (plus 1 "no model left", 7 "all models limited, back off 45 s").
+- From commit `412fecb` (stage 3, 14:02:02) it holds the non-final parts of a numbered
+  handoff and gives the seat the whole message when the last part arrives, reading any
+  parts the seat did not receive back from the room (read-only). The assembled prompt
+  starts with this proxy-written line: *"[All N parts of this numbered message from
+  <sender>, assembled in order by the seat proxy. The earlier parts were held, so this is
+  the first time you see them. Act on the whole message now.]"* The parts themselves are
+  verbatim.
+
+### Stage 1 (dispatch 10:57:04)
+
+| Time | Action | Why |
+|---|---|---|
+| ~11:07 | Retro: `band runtime interrupt` of the active turn; `band ack` of 7 handoff-part messages it had already handled (duplicates in its queue); model set to mimo-v2.6-flash-free; seat restarted (proxy start 11:07:36), running proxy code with extended acknowledgement patterns (committed later as `ec22bb2`). | After failover to nemotron the seat looped on no-op tool calls (71 `true` calls). |
+
+### Between stages 1 and 2 (11:48:16–12:03:38)
+
+| Time | Action |
+|---|---|
+| 11:56:28–12:00:19 | Commits by Shine: `ec22bb2` (proxy acknowledgement patterns), `9790786` (mandates: never list, open or search the checks' test folders — the stage-1 reviewer had listed the test folder and grepped test names at 11:29:05, after its own passing run), `9adcbb5` (earlier stage specs travel with the later stage). Retro model back to hy4. |
+| 11:56:46–12:00:40 | All four seats restarted (three rounds) so they load the new mandates and proxy. |
+
+### Stage 2 (dispatch 12:03:38)
+
+| Time | Action | Why |
+|---|---|---|
+| ~13:04 | Implementer: `band runtime interrupt` of the active turn. | On big-pickle it made 135 no-op `true` calls in one turn on a message that needed nothing, and never reached the REJECT. |
+| ~13:09 | Implementer: model set to longcat-2.5-free, interrupt, restart (proxy start 13:09:34). 5 queued messages (the verdict and REJECT routing) were re-delivered by Band. | A model switch only applies to a new session. |
+| 13:17:16 | Implementer restarted on deepseek. | longcat and deepseek both hit limits within 1 s; the proxy's failover guard then skipped the second switch and the turn died (fixed in `5b0560c`). |
+| ~13:18 | Implementer: interrupt, model set to glm-5.3-flash-free, restart (13:18:22). | deepseek limited again and fell to big-pickle. glm was not in the implementer's mandate model line at the time (fixed in `5b0560c`). The fix commit `2cd5de3` followed at 13:21:04. |
+| 13:35:07 | Retro restarted on hy4 (after the final report, before it closed the unit). | Its turn died after a failover with 3 messages queued; it then closed the unit (`8b7ca7f`). |
+
+### Between stages 2 and 3 (13:26:23–13:46:03)
+
+| Time | Action |
+|---|---|
+| 13:38:34 | Commit `5b0560c` by Shine: implementer fallbacks glm + longcat (big-pickle dropped), per-model failover guard, more acknowledgement shapes dropped. |
+| 13:39:15–13:42:14 | Implementer runtime template updated; all four seats restarted (twice; in the first round the implementer's model setting had not applied). Room models: coordinator glm, implementer deepseek, reviewer big-pickle, retro hy4. |
+
+### Stage 3 (dispatch 13:46:03)
+
+| Time | Action | Why |
+|---|---|---|
+| ~13:58 | Implementer: `band runtime interrupt` (had no effect). | After all three of its models hit limits it was looping slowly with 10 handoff parts queued; longcat had posted 5 placeholder-token replies (`<\|eot\|>` etc.) to the room at 13:51:32–13:53:04. |
+| 14:02:02 / 14:02:56 | Commit `412fecb` (part assembly, placeholder-token replies dropped, failover never gives up); implementer restarted. Proxy assembled 26/26 parts (16 read back from the room); all three models still limited. | One model turn per handoff part burned the free quota. |
+| 14:05:56 / 14:06:04 | Commit `842f01f` (45 s back-off when every model is limited); implementer restarted; assembled 26/26 and started work on deepseek. | |
+| 14:08:55–57 | Reviewer and retro restarted while idle (queues empty) to load the new proxy. | |
+| ~15:01 (15:01:13, 15:01:18) | Reviewer: model list changed to longcat-2.5-free first (then big-pickle, deepseek, glm), interrupt, restart. The coordinator's 27-part verification handoff was assembled 27/27. | big-pickle, deepseek and glm all reported free limits; the seat had cycled them for 4 minutes. The reviewer mandate model line was updated to match in `1227217`. |
+
+### Between stages 3 and 4 (15:35:01–15:49:07)
+
+| Time | Action |
+|---|---|
+| 15:46:22 | Commit `1227217` by Shine: reviewer longcat first; proxy drops echoed `<system-reminder>` replies. |
+| 15:46:41–51 | All four seats restarted. |
+
+### Stage 4 (dispatch 15:49:07)
+
+| Time | Action | Why |
+|---|---|---|
+| ~15:57 (15:57:01, 15:57:06) | Implementer: model list set to hy4-flash-free first (then deepseek, glm, longcat), interrupt, restart. **The interrupt settled the queued last part of the coordinator's handoff as processed, so the restarted seat received nothing.** | deepseek, glm and longcat all refused the 104K-character handoff prompt with "Free usage limit"; hy4 accepted a prompt of that size. |
+| 15:59:24 / 15:59:31 / 15:59:50 | Commit `fb06769` (operator re-delivery); implementer restarted; the proxy re-delivered room message `bd5be5e3…` (part 24/24 of the coordinator's handoff), assembling all 24 parts verbatim from the room. Nothing was posted. The re-delivered prompt carried this operator-written note, word for word: *"Re-delivered by the operator: an earlier delivery of this message was cancelled before you saw it. Your closing text for this turn is not posted anywhere, so send anything others need with the tools your mandate names."* | To undo the lost delivery caused by the interrupt above. |
+| 16:25:55–16:33:10 | (No action.) All four implementer models refused its calls, whose context had reached about 148K tokens; the re-delivered turn ended with an internal error at 16:33:10, leaving the seat idle with its stage-4 edits uncommitted. | |
+| 16:38:34 / 16:38:43 / 16:39:01 | Commit `d22c560` (the re-delivery note can state why); implementer model list set to longcat-2.5-free first (then hy4, deepseek, glm) and restarted in a fresh session; the proxy re-delivered message `bd5be5e3…` again, all 24 parts verbatim. Operator-written note, word for word: *"Re-delivered by the operator: the earlier delivery of this message ended early because the model provider refused further requests (free usage limit). Your closing text for this turn is not posted anywhere, so send anything others need with the tools your mandate names."* | A fresh session restarts the context at the size of the handoff; longcat had accepted a prompt of that size minutes earlier. |
+| 16:51–16:57 | (No action.) The implementer committed `b51897c` and ended its re-delivered turn with its stage-4 handoff as closing text (1,915 characters). Because the proxy at that time only logged the closing text of a re-delivered turn, the handoff was not posted and the stage stalled. | |
+| 16:57:31 | Operator relayed the implementer's saved closing text, word for word and unedited (sha256 `c03220f3…dbc10`), as the implementer seat: `band send --as guptashine5002/implementer --body-file s4-implementer-unposted-report.txt` (room message `3bbd0475…`). Checked beforehand for credentials and test-folder content (none). Band delivered it to the coordinator; the text's `@reviewer` short form is not a Band handle and stayed literal, as it would have in a normal delivery. The operator added no words. | To complete the delivery the operator's re-delivery change had suppressed; the text is the seat's own. |
+| 16:58:33 | Commit `2121592`: the proxy now posts a re-delivered turn's closing text as that seat (`band send --as`), as Band does after a normal delivery (bare acknowledgements are still dropped). The re-delivery note now reads: *"Re-delivered by the operator: <why> Your closing text for this turn is posted to the room as your reply, as usual."* Takes effect at the seat's next restart. | Prevents a repeat of the stall above. |
+| 17:02:38 / 17:02:55 | Reviewer model list set to hy4-flash-free first (then longcat, big-pickle, deepseek, glm) and the reviewer restarted in a fresh session, after all four of its models refused the 24-part verification handoff (105K characters) with "Free usage limit reached" from 16:58:10. Band re-delivered the handoff itself (it was still queued); no operator re-delivery was needed and nothing was posted. | Quota wall; hy4 had accepted a prompt of that size for the implementer. |
+| 17:13:02 / 17:13:06 | Reviewer model list extended with flint-40b-free and inkling-2-small-free at the end (they accepted a 103K-character filler prompt in an operator test outside the room) and the reviewer restarted twice in a row (`--apply-and-restart`, then `band restart`), again a fresh session. Band re-delivered the still-queued handoff; Band's model setting started the turn on longcat-2.5-free, which accepted it; review began at 17:13:45. Nothing was posted. | Quota wall continued after the first restart. |
+| 17:53:43 | Commit `2bc9904`: correction to `2121592`. The proxy posts only a re-delivered turn's closing text (the message text after the turn's last tool call, which is what Band posts after a normal delivery), not the whole turn's narration. Never exercised in the room before this correction (no re-delivery happened in between). | `2121592` would have posted the whole turn's text. |
+| 18:12:47–18:17:07 | Operator ran the participant guide's live build of frozen `stage-4/` against runway.com with the Nimble key (key passed by environment only, never printed or committed), saved the unchanged `GET /dossiers/runway.com` response as `dossier-runway.com.json`, and committed it (`bf36f4f`). After the final report; touched no stage folder. | Required submission artifact. |
+
+## 9. Known seat-side lapses (from the tool-call audit)
+
+- Stage 1, 11:29:05 UTC: the reviewer listed the checks' test folder and grepped test names,
+  after its own passing harness run. The mandates were tightened between stages
+  (`9790786`); no later seat opened a test file.
+- Stage 2: the implementer read the factory's own tooling checkout outside the result
+  repository four times (not task or test material).
+- Stage 3: the implementer ran `ls` on the challenge folder, which showed the `test`
+  folder's name; it did not open it.
+- Stage 4: the coordinator made the baseline copy commit itself (`d99b58b`), which is the
+  implementer's job in its mandate.
+- Room noise that reached the room despite the proxy: 5 placeholder-token replies from the
+  stage-3 implementer (`<|eot|>` and similar), echoed `<system-reminder>` lines, long
+  "## Objective" narration summaries, and in stage 3 the coordinator's final report began
+  with its own planning notes. The stage-4 final report (18:07:42) was the coordinator's
+  end-of-turn text, so Band addressed it as a reply to the reviewer rather than to the human,
+  and it also begins with planning notes. Seats posted a few messages after some final reports.
+- No seat read a later stage's specification, the kickoff files or the Nimble key (audit of
+  every seat tool call).
+
+## 10. Mandate `Model:` lines versus the models actually run
+
+The `Model:` line in each mandate names the seat's primary model and fallbacks. The operator
+changed the runtime model lists from the command line during the run (§8) and only updated
+the mandate files between stages, so for some periods the runtime list and the mandate line
+differ. The model lists below come from the proxy's `start` log lines; the call counts are
+assistant calls in OpenCode's database from the stage-1 dispatch (10:57:04) to the stage-4
+final report (18:07:42).
+
+| Seat | Mandate `Model:` line (final) | Runtime model lists (UTC from) | Calls per model |
+|---|---|---|---|
+| coordinator | glm-5.3, then longcat-2.5, hy4 | 10:57 glm-5.3, longcat-2.5, hy4 (matches) | glm 97, longcat 77, hy4 102 |
+| implementer | deepseek-v4.1, then glm-5.3, longcat-2.5 | 11:00 deepseek, big-pickle, longcat (matched the mandate then); 13:39 deepseek, glm, longcat (matches); **15:57 hy4, deepseek, glm, longcat; 16:38 longcat, hy4, deepseek, glm** (not in the mandate) | deepseek 391, big-pickle 149, hy4 277, longcat 52, glm 28 |
+| reviewer | longcat-2.5, then big-pickle, deepseek-v4.1, glm-5.3 | 11:25 big-pickle, deepseek, glm (matched the mandate then); **15:01 longcat first** (mandate updated 15:46, `1227217`); **17:02 hy4 first; 17:13 hy4, longcat, big-pickle, deepseek, glm, flint-40b, inkling-2-small** (not in the mandate) | big-pickle 403, longcat 123, deepseek 8, glm 7, hy4 2; flint and inkling 0 |
+| retro | hy4, then nemotron-3.5-lightning, mimo-v2.6 | 10:57 same (matches) | hy4 119, nemotron 118, mimo 25 |
+
+All listed models are OpenCode free-tier models (`opencode/<name>-free`, plus `big-pickle`).
+Band's own model setting picks the model a turn starts on (for example the reviewer's turns
+started on longcat after 17:13), and the proxy moves to the next listed model on a usage-limit
+error. The mandate files were not edited after the stage-4 dispatch, so they still show the
+stage-3/4 lines above.
