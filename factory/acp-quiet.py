@@ -35,6 +35,7 @@ ACK_PATTERNS = [
     r"\bend(ing|s)? (the|my|this) turn\b", r"\bno tool calls?\b", r"\bsilent turn\b",
 ]
 ACK_RE = re.compile("|".join(ACK_PATTERNS), re.I | re.M)
+PART_RE = re.compile(r"^(?:@\S+\s+)+(?P<title>[^\n]*?) \u2014 part (?P<i>\d+)/(?P<n>\d+) \((more parts follow; act on the last part|last part)\)", re.M)
 MENTION_RE = re.compile(r"@\[\[[^\]]*\]\]|@[\w.-]+(/[\w.-]+)?")
 
 # Anything that carries a decision or evidence is always released.
@@ -45,7 +46,7 @@ SILENT_RE = re.compile(r"\bend(ing|s)?( (the|my|this))?( turn)? silently\b|\bno 
 
 def is_ack(text: str) -> bool:
     core = MENTION_RE.sub("", text)
-    core = re.sub(r"</?[A-Za-z][^>]*>", "", core).strip()   # placeholder markup such as <void />
+    core = re.sub(r"</?[A-Za-z][^>]*>|<\|[^|<>]{0,40}\|>", "", core).strip()   # placeholder markup such as <void /> or <|eot|>
     if not core:
         return True
     # A short turn that says it is ending silently is never meant for the room, whatever words it quotes
@@ -115,11 +116,84 @@ def main() -> int:
             sys.stdout.buffer.write(raw)
             sys.stdout.buffer.flush()
 
+    parts = {}     # sessionId -> {"key": (room, sender, title, n), "got": {i: text}}
+
+    def fetch_parts(room, sender, title, n, need):
+        """Missing parts of a numbered message, read back from the room (read-only)."""
+        found, cur = {}, None
+        import shutil; band = shutil.which("band") or "/usr/bin/band"
+        for _ in range(4):
+            cmd = [band, "room", "messages", room, "--json", "--type", "text"] + (["--cursor", cur] if cur else [])
+            try:
+                d = json.loads(subprocess.run(cmd, capture_output=True, text=True, timeout=30).stdout)
+            except Exception as e:
+                note(event="parts_fetch_error", err=repr(e)[:160]); break
+            for m in d.get("messages", []):
+                if (m.get("sender_name") or "") != sender.split("/")[-1]: continue
+                mm = PART_RE.search(m.get("content") or "")
+                if not mm or int(mm.group("n")) != n or mm.group("title").strip() != title: continue
+                i = int(mm.group("i"))
+                if i in need and i not in found:
+                    found[i] = (m.get("content") or "")
+            if all(i in found for i in need) or not d.get("has_more") or not d.get("next_cursor"): break
+            cur = d["next_cursor"]
+        return found
+
+    def assemble(msg, sid):
+        """Hold non-last parts of a numbered message (answer them as silent turns) and give the
+        agent the whole message, in order, with the last part, so it acts once on all of it."""
+        pr = (msg.get("params") or {}).get("prompt") or []
+        text = "\n".join(b.get("text", "") for b in pr if isinstance(b, dict))
+        mm = PART_RE.search(text)
+        if not mm:
+            return None
+        i, n, title = int(mm.group("i")), int(mm.group("n")), mm.group("title").strip()
+        room = (re.search(r"^Room: (\S+)", text, re.M) or [None, ""])[1]
+        sender = (re.search(r"^From: (\S+)", text, re.M) or [None, ""])[1]
+        key = (room, sender, title, n)
+        st = parts.get(sid)
+        if not st or st["key"] != key:
+            st = parts[sid] = {"key": key, "got": {}}
+        body = text.split("\nContent:\n", 1)[-1]
+        bm = PART_RE.search(body)
+        piece = body[bm.start():] if bm else body
+        st["got"][i] = piece.split("\n\n\n[ACP TURN SETTLEMENT]", 1)[0]   # Band's per-turn footer stays on the final prompt only
+        if i < n and "more parts follow" in mm.group(0):
+            note(event="part_held", session=sid, part=i, of=n, title=title[:80])
+            return "held"
+        need = [k for k in range(1, n + 1) if k not in st["got"]]
+        if need and room and sender:
+            got = fetch_parts(room, sender, title, n, need)
+            st["got"].update(got)
+            note(event="parts_fetched", session=sid, need=need, got=sorted(got))
+        missing = [k for k in range(1, n + 1) if k not in st["got"]]
+        whole = "\n\n".join(f"===== part {k}/{n} =====\n" + st["got"][k] for k in range(1, n + 1) if k in st["got"])
+        parts.pop(sid, None)
+        intro = (f"[All {n} parts of this numbered message from {sender}, assembled in order by the seat proxy"
+                 + (f"; parts {missing} could not be recovered, ask the sender for exactly those" if missing else "")
+                 + ". The earlier parts were held, so this is the first time you see them. Act on the whole message now.]\n\n")
+        footer = ("\n\n\n[ACP TURN SETTLEMENT]" + text.split("\n\n\n[ACP TURN SETTLEMENT]", 1)[1]) if "\n\n\n[ACP TURN SETTLEMENT]" in text else ""
+        msg["params"]["prompt"] = [{"type": "text", "text": text.split("\nContent:\n", 1)[0] + "\nContent:\n" + intro + whole + footer}] + \
+                                  [b for b in pr if isinstance(b, dict) and b.get("type") != "text"]
+        note(event="parts_assembled", session=sid, of=n, missing=missing, chars=len(whole))
+        return "assembled"
+
     def client_to_agent():
         for raw in sys.stdin.buffer:
             try:
                 msg = json.loads(raw)
                 if isinstance(msg, dict) and msg.get("method") == "session/prompt":
+                    sid0 = (msg.get("params") or {}).get("sessionId")
+                    try:
+                        r = assemble(msg, sid0)
+                    except Exception as e:
+                        r = None; note(event="assemble_error", err=repr(e)[:200])
+                    if r == "held":
+                        emit((json.dumps({"jsonrpc": "2.0", "id": msg.get("id"),
+                                          "result": {"stopReason": "end_turn"}}) + "\n").encode())
+                        continue
+                    if r == "assembled":
+                        raw = (json.dumps(msg) + "\n").encode()
                     sid = (msg.get("params") or {}).get("sessionId")
                     pending[msg.get("id")] = sid
                     prompts[msg.get("id")] = raw
@@ -191,7 +265,11 @@ def main() -> int:
                     if m != cur and now - failed_at.get(m, 0) > cooldown), None) if cur in models else \
               next((m for m in models if now - failed_at.get(m, 0) > cooldown), None)
         if not nxt:
-            note(event="failover_exhausted", session=sid, model=cur, reason=reason[:160]); return
+            others = [m for m in models if m != cur]
+            if not others:
+                note(event="failover_exhausted", session=sid, model=cur, reason=reason[:160]); return
+            nxt = min(others, key=lambda m: failed_at.get(m, 0))
+            note(event="failover_all_cooling", session=sid, model=cur, pick=nxt)
         note(event="failover", session=sid, frm=cur, to=nxt, reason=reason[:160])
         retrying[rid] = True
         held[sid] = []; texts[sid] = ""
