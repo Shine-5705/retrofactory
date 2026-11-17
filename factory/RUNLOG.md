@@ -62,3 +62,30 @@ Times are UTC. Where a figure was not stated in a room message, it is marked
 - Review rounds: 2 (round 1 REJECT at be11ee3; round 2 ACCEPT at 2cd5de3).
 - Unit closed by coordinator freeze of 2cd5de3; closed in this log 2026-11-17 13:29.
 - Spend: not reported (no seat reported model or provider spend figures).
+
+## Stage 3 — dossier (extended) — CLOSED
+
+- Prerequisite retro checklist (209 items + coverage gaps + lessons): delivered
+  2026-11-17 13:48 (measured: `/tmp/opencode/s3-retro-reply.md` mtime). Lessons
+  carried forward: no new Standing rules; stage-2 REJECT lesson (candidate
+  dedupe key) applicable.
+- Handoff (coordinator -> implementer): 2026-11-17 (measured: handoff text
+  `/tmp/opencode/s3-implementer-handoff.md` mtime 13:50). Target stage-3/, copied
+  from frozen stage-2/ baseline.
+- Implementation commits: baseline copy `63c7d41` at 2026-11-17 14:08:40; final
+  revision `437e78bd3338b3945af96063fc0839b572cf24c6` at 2026-11-17 14:54:19
+  (measured: git commit time). Implementer harness runs finished 14:33:54,
+  14:51:45, 14:56:30 (measured: `checks/stage-1-real/s3-*`/`s3-1794927*/report.json`
+  mtimes).
+- Review handoff (coordinator -> reviewer): 2026-11-17 14:56 (measured:
+  `/tmp/opencode/s3-reviewer-handoff.md` mtime 14:58). Reviewer harness runs
+  finished 15:04:25 and 15:08:25 (measured: `checks/stage-1-real/s3-rev-*`/`s3-rev2-*`
+  report mtimes).
+- Verdict: ACCEPT of revision 437e78b, delivered in room 2026-11-17 (measured:
+  coordinator close message `/tmp/opencode/s3-close.md` mtime 15:34). Reviewer
+  reported harness stage 1 122/122, stage 2 12/12, stage 3 9/9; 171 independent
+  probe checks; live docker restart and mid-build kill -9 probes passed.
+- Review rounds: 1 (first review accepted; no REJECT recorded for this stage).
+- Ledger: no stage-3 REJECT to record (none occurred).
+- Unit closed by coordinator freeze of 437e78b; closed in this log 2026-11-17 15:34.
+- Spend: not reported (no seat reported model or provider spend figures).
