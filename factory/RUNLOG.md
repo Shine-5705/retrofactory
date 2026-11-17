@@ -90,47 +90,50 @@ Times are UTC. Where a figure was not stated in a room message, it is marked
 - Unit closed by coordinator freeze of 437e78b; closed in this log 2026-11-17 15:34.
 - Spend: not reported (no seat reported model or provider spend figures).
 
-## Stage 4 — dossier (in progress)
+## Stage 4 — dossier (extended) — CLOSED
 
 - Prerequisite retro checklist (S4-1..S4-85 + 6 ambiguities + lessons + time/spend):
   delivered 2026-11-17 ~15:50 (measured: `/tmp/opencode/s4-retro-reply.md` mtime
   and this turn; 20-part handoff plan file `/tmp/opencode/s4-retro-plan.md` mtime
   15:49). Sent to @coordinator as 5 parts via `factory/send-parts.py`. Lessons
-  carried forward: stage-2 REJECT (be11ee3, candidate dedupe key) applicable;
-  Standing rules still empty (no second occurrence).
-- S4-0a baseline copy stage-3/ -> stage-4/ commit d99b58b already exists;
-  stage-3/ untouched.
-- Implementation commit and review verdicts: not yet occurred. Review rounds:
-  0 so far.
-- Spend: STAGE 4 not reported. Carried from stages 1–3: not reported.
-- Review verdict: REJECT of revision b51897cdc45e37c2b86f893d2193c89b48f74a60,
-  delivered in room 2026-11-17 (measured: reviewer message this turn). Reviewer
-  basis: clean detached worktree, stage-1/2/3 diff vs d99b58b empty, docker build
-  ok, supplied harness all stages pass, 10 independent probes. Failing items:
-  S4-21, S4-22 (scalar corroborated_since), S4-29, S4-30 (member-field
-  corroborated_since), S4-51 (investors missing from history screen). Root causes
-  supplied by reviewer; no need to ask implementer.
-- Review rounds: 1 (REJECT). Ledger: added stage-4 REJECT entries; promoted the
-  collapse/lose-evidence root cause to Standing rules (second occurrence, first
-  be11ee3). New S4-51 root cause (new field omitted from one render path) recorded.
-- Implementer fix revision f000d83bcb8e4627ce59b5ae7a763dde0f1bcdaa (b51897c not
-  amended): all 5 original findings fixed; implementer reported harness + 10/10
-  probes pass.
-- Review verdict: REJECT of f000d83 (measured: reviewer message this turn). Basis:
-  clean detached worktree, harness stages 1/2/3/4 pass, 10/10 probes pass. Original
-  5 findings confirmed fixed. NEW FAIL S4-28 regression: member `corroborated`
-  computed from standing origins instead of current-candidate origins (server.py:937),
-  false at p3 t3 where Ana has one current origin. Also: reported tree was dirty
-  (uncommitted fix of that line); handoff claimed clean.
-- Review rounds: 2 (both REJECT). Ledger: added f000d83 REJECT entry; root cause
-  (sibling field using wrong evidence basis) is a first occurrence, not promoted.
-  Standing rules still the single collapsed-evidence rule. Coordinator clarified
-  S4-28 was a regression from the b51897c fix, corrected in clean revision
-  cd6208cc44ac7e2ee34cf9c4c25c698f574cc02d (parent f000d83; only change is
-  stage-4/server.py member `corroborated` back to current-candidate origins),
-  now under re-review.
-- Open risk (reviewer): no live Nimble credentials; provider 429/5xx/all-fail
-  exercised with reviewer mock only.
-- Spend: STAGE 4 not reported (no seat reported figures).
-- Unit remains open; close it here on the final ACCEPT and forward the frozen
-  revision's figures.
+  carried forward: stage-2 REJECT (be11ee3, candidate dedupe key) applicable.
+- S4-0a baseline copy stage-3/ -> stage-4/ commit d99b58b at 2026-11-17 15:49:26
+  (measured: git commit time); stage-3/ untouched.
+- Handoff (coordinator -> implementer): ~15:50-15:51 UTC (measured: checklist
+  above and retro log commit b8ccc70 at 15:51:05). Complete task text, checklist
+  S4-1..S4-85 + A1..A6, stage-2 rejection lesson and all four specs attached
+  verbatim; five ordered units.
+- First implementation revision b51897cdc45e37c2b86f893d2193c89b48f74a60 at
+  2026-11-17 16:52:13 (measured: git commit time).
+- Review round 1 verdict: REJECT of b51897c (measured: reviewer message this turn).
+  Basis: clean detached worktree, stage-1/2/3 diff vs d99b58b empty, docker build
+  ok, supplied harness all stages pass, 10 independent probes (p1..p10). Failing:
+  S4-21/S4-22 (scalar corroborated_since), S4-29/S4-30 (member corroborated_since),
+  S4-51 (investors missing from history screen). Root causes supplied by reviewer.
+- Fix revision f000d83bcb8e4627ce59b5ae7a763dde0f1bcdaa at 2026-11-17 17:55:06
+  (measured: git commit time; b51897c not amended): all 5 original findings fixed;
+  implementer reported harness + 10/10 probes pass.
+- Review round 2 verdict: REJECT of f000d83 (measured: reviewer message this turn).
+  Basis: clean detached worktree, harness stages 1/2/3/4 pass, 10/10 probes pass;
+  original 5 findings confirmed fixed. NEW FAIL S4-28 regression: member
+  `corroborated` computed from standing origins instead of current-candidate
+  origins (server.py:937); also the reported tree was dirty (the uncommitted fix).
+- Correction revision cd6208cc44ac7e2ee34cf9c4c25c698f574cc02d at 2026-11-17
+  17:59:58 (measured: git commit time; parent f000d83, clean tree; only change is
+  stage-4/server.py member `corroborated` reverted to current-candidate origins
+  while keeping the per-member `member_since` and all-gather-times fix).
+- Review round 3 verdict: ACCEPT of cd6208c (measured: coordinator close message
+  this turn); reviewer reported all S4-1..S4-85 + A1..A6 PASS.
+- Freeze: coordinator froze stage-4/ at cd6208c, tag `stage-4-frozen`, freeze
+  commit 15f62c9 at 2026-11-17 18:07:24 (measured: git commit time and tag).
+- Review rounds: 3 (rounds 1 and 2 REJECT, round 3 ACCEPT).
+- Ledger: stage-2 collapse/dedupe root cause promoted to Standing rules after its
+  second occurrence (b51897c); new root causes recorded as first occurrences —
+  b51897c "new field omitted from one render path" (S4-51) and f000d83 "sibling
+  field computed from wrong evidence basis / S4-28 regression from the prior fix".
+- Open risk (reviewer, carried into ACCEPT): no live Nimble credentials; provider
+  429/5xx/all-fail behaviour exercised with the reviewer mock only.
+- Spend: not reported (no seat reported model or provider spend figures for stage 4).
+  Carried from stages 1–3: not reported.
+- Unit closed by coordinator freeze of cd6208c; closed in this log 2026-11-17
+  ~18:08 UTC (measured: this turn).
