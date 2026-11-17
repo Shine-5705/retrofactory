@@ -44,7 +44,8 @@ def is_ack(text: str) -> bool:
     core = re.sub(r"</?[A-Za-z][^>]*>", "", core).strip()   # placeholder markup such as <void />
     if not core:
         return True
-    if KEEP_RE.search(core):
+    # "waiting on the verdict" is status, not a verdict: drop that phrase before the keep check
+    if KEEP_RE.search(re.sub(r"\b(awaiting|waiting (on|for))\b[^.;\n]{0,40}\bverdict\b", "", core, flags=re.I)):
         return False
     return len(core) <= MAX_ACK_CHARS and bool(ACK_RE.search(core))
 

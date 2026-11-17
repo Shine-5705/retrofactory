@@ -97,6 +97,25 @@ ping-pong and the first 11 minutes were lost to a free-model usage limit.
 - Polling: the coordinator checked `git log` 33 times inside one turn. Mandates now ban
   repeated checks of the repository, check folders or room; the handoff message is the wake.
 
+## 0f. Lessons from practice-4 (17 Nov) — proxy launch and split handoffs
+
+Practice-4 passed (stage 1 8/8, $0) with 25 room messages in total (practice-3: 269).
+
+- Launch: Band starts the seat command with a minimal PATH and JSON-RPC ids that are UUID
+  strings. acp-quiet now resolves the agent binary itself (falling back to `~/.local/bin`)
+  and treats ids as opaque, and a relay error can never swallow a line. If a seat shows
+  `Failed` with "ACP protocol handshake did not become ready", touch
+  `ops/acp-quiet/TRACE` (traces new spawns), `band restart` the seat and read its log.
+- Real failover seen: implementer deepseek "Free usage limit" → big-pickle in under a
+  second, one turn as far as Band could tell.
+- Seats acted on part 1 of a split handoff and the coordinator re-sent parts. Mandates now
+  say a split handoff is one handoff (act on the last part) and to resend only on a
+  reported send failure.
+- Box reboot recovery: a reboot can drop system packages (band/jamd, docker, dnsmasq,
+  /etc configs) and reset ownership under /workspace/band. Reinstall Band from
+  downloads.band.ai, docker static + buildx, iptables-legacy, dnsmasq config, then
+  `bin/start-docker.sh`, and re-lock `kickoffs/ held-specs/ archive/ .nimble_key` to root.
+
 ## 1. Kickoff package
 
 ```sh

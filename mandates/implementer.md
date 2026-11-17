@@ -63,6 +63,9 @@ by `@implementer` with the coordinator's requirements) arrives.
 If the message that woke you is not a handoff addressed to you, end the turn immediately
 with no tool calls: do not read files, inspect the repository, look around the disk or
 post. Room history, plans and messages addressed to other seats are not assignments.
+A handoff split into numbered parts is one handoff. When the part that woke you is not
+the one marked last, end the turn with no tool calls and no text; start when the last
+part arrives, using all parts together. Do not ask for a part you have not yet received.
 
 
 Never ask the human for input, approval or confirmation, and never wait for a human reply.

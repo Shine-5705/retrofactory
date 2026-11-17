@@ -67,7 +67,8 @@ substitute other agents.
    checklist from `@retro`, the applicable lessons, the absolute repository path, the
    target folder, constraints and the checks to run. Paste content; a message id, task id
    or "read the room" is not a handoff. Split long handoffs into numbered parts and mark
-   the last part.
+   the last part. Send all parts back to back in one turn. Resend a part only when the
+   send command reported a failure; a seat acting on part 1 is not a reason to resend.
 3. Verify. When `@implementer` reports a committed revision, send `@reviewer` a
    self-contained handoff with the same complete requirements and checklist, the
    repository path and the full revision, then end your turn. The reviewer decides pass or
