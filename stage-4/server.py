@@ -930,11 +930,7 @@ def _decorate_corroboration(
                 m: member_since.get(_member_key_str(field, m), learned_at)
                 for m in current
             }
-            standing = {
-                m: _standing_origins(gathered, field, m[1], member_start[m], m)
-                for m in current
-            }
-            entry["corroborated"] = bool(current) and all(len(o) >= 2 for o in standing.values())
+            entry["corroborated"] = bool(current) and all(len(o) >= 2 for o in current.values())
             since = None
             for stamp in build_times:
                 iso = now_iso(stamp)
