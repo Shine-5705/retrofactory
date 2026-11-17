@@ -31,6 +31,8 @@ ACK_PATTERNS = [
     r"^\W*(ok(ay)?|done|ack|yes|sure|roger)\W*$", r"\b(standing by|stand by|awaiting|waiting)\b",
     r"\bending (the |my )?turn\b", r"\bno (work|task) (for me|remains?)\b", r"\bnot addressed to me\b",
     r"^[\W_]*$", r"(收到|已静默|无操作|好的|明白)",
+    r"\b(not|isn't) the (last|final) part\b", r"\bwait(ing)? for the (last|final|remaining) parts?\b",
+    r"\bend(ing|s)? (the|my|this) turn\b", r"\bno tool calls?\b", r"\bsilent turn\b",
 ]
 ACK_RE = re.compile("|".join(ACK_PATTERNS), re.I | re.M)
 MENTION_RE = re.compile(r"@\[\[[^\]]*\]\]|@[\w.-]+(/[\w.-]+)?")
